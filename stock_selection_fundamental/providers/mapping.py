@@ -1,32 +1,67 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 import pandas as pd
 
 
-SECURITY_MASTER_ALIASES = {
-    "ticker": "symbol",
-    "code": "symbol",
-    "stock_code": "symbol",
-    "listing_date": "list_date",
+@dataclass(frozen=True, slots=True)
+class FieldMappingVersion:
+    source: str
+    version: str
+    security_master: dict[str, str]
+    price: dict[str, str]
+    financial: dict[str, str]
+    release_calendar: dict[str, str]
+
+
+MAPPING_REGISTRY: dict[str, FieldMappingVersion] = {
+    "hk_akshare_v1": FieldMappingVersion(
+        source="hk_akshare",
+        version="v1",
+        security_master={"ticker": "symbol", "stock_code": "symbol", "listing_date": "list_date"},
+        price={"trade_date": "date", "suspend": "is_suspended"},
+        financial={"report_date": "period_end", "ann_date": "release_date", "total_debt": "total_liabilities"},
+        release_calendar={"ann_date": "release_date", "report_date": "period_end"},
+    ),
+    "cn_akshare_v1": FieldMappingVersion(
+        source="cn_akshare",
+        version="v1",
+        security_master={"ticker": "symbol", "stock_code": "symbol", "listing_date": "list_date"},
+        price={"trade_date": "date", "suspend": "is_suspended"},
+        financial={"report_date": "period_end", "ann_date": "release_date", "total_debt": "total_liabilities"},
+        release_calendar={"ann_date": "release_date", "report_date": "period_end"},
+    ),
+    "local_csv_v1": FieldMappingVersion(
+        source="local_csv",
+        version="v1",
+        security_master={"ticker": "symbol", "code": "symbol", "stock_code": "symbol", "listing_date": "list_date"},
+        price={"trade_date": "date", "suspend": "is_suspended"},
+        financial={"report_date": "period_end", "ann_date": "release_date", "total_debt": "total_liabilities"},
+        release_calendar={"ann_date": "release_date", "report_date": "period_end"},
+    ),
 }
 
-PRICE_ALIASES = {
-    "trade_date": "date",
-    "suspend": "is_suspended",
+
+INDUSTRY_CANONICAL_MAP: dict[str, str] = {
+    "technology": "TECH",
+    "information technology": "TECH",
+    "consumer": "CONSUMER",
+    "consumer discretionary": "CONSUMER",
+    "consumer staples": "CONSUMER",
+    "healthcare": "HEALTHCARE",
+    "medical": "HEALTHCARE",
+    "industrials": "INDUSTRIALS",
+    "materials": "MATERIALS",
+    "utilities": "UTILITIES",
+    "financials": "FINANCIALS",
+    "real estate": "REAL_ESTATE",
+    "telecommunications": "TELECOM",
+    "communication services": "TELECOM",
+    "energy": "ENERGY",
 }
 
-FINANCIAL_ALIASES = {
-    "report_date": "period_end",
-    "ann_date": "release_date",
-    "total_debt": "total_liabilities",
-}
-
-RELEASE_ALIASES = {
-    "ann_date": "release_date",
-    "report_date": "period_end",
-}
 
 STANDARD_FINANCIAL_FIELDS = (
     "symbol",
@@ -39,6 +74,14 @@ STANDARD_FINANCIAL_FIELDS = (
     "invested_capital",
     "total_liabilities",
 )
+
+
+def resolve_mapping(mapping_key: str | None) -> FieldMappingVersion:
+    if not mapping_key:
+        return MAPPING_REGISTRY["local_csv_v1"]
+    if mapping_key not in MAPPING_REGISTRY:
+        raise KeyError(f"Unknown mapping key: {mapping_key}")
+    return MAPPING_REGISTRY[mapping_key]
 
 
 def ensure_datetime(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
@@ -78,18 +121,31 @@ def infer_exchange_from_symbol(symbol: str) -> str:
     return "UNKNOWN"
 
 
-def standardize_security_master(frame: pd.DataFrame) -> pd.DataFrame:
-    output = rename_to_standard(frame, SECURITY_MASTER_ALIASES)
+def normalize_industry_label(label: str | None) -> str:
+    if label is None or pd.isna(label):
+        return "UNKNOWN"
+    key = str(label).strip().lower()
+    return INDUSTRY_CANONICAL_MAP.get(key, key.upper().replace(" ", "_"))
+
+
+def standardize_security_master(frame: pd.DataFrame, mapping_key: str = "local_csv_v1") -> pd.DataFrame:
+    mapping = resolve_mapping(mapping_key)
+    output = rename_to_standard(frame, mapping.security_master)
     output = ensure_datetime(output, ["list_date", "delist_date"])
     if "market" not in output.columns:
         output["market"] = output["symbol"].map(infer_market_from_symbol)
     if "exchange" not in output.columns:
         output["exchange"] = output["symbol"].map(infer_exchange_from_symbol)
+    if "industry" in output.columns:
+        output["industry_std"] = output["industry"].map(normalize_industry_label)
+    else:
+        output["industry_std"] = "UNKNOWN"
     return output
 
 
-def standardize_price_history(frame: pd.DataFrame) -> pd.DataFrame:
-    output = rename_to_standard(frame, PRICE_ALIASES)
+def standardize_price_history(frame: pd.DataFrame, mapping_key: str = "local_csv_v1") -> pd.DataFrame:
+    mapping = resolve_mapping(mapping_key)
+    output = rename_to_standard(frame, mapping.price)
     output = ensure_datetime(output, ["date"])
     if "is_suspended" in output.columns:
         output["is_suspended"] = output["is_suspended"].fillna(True).astype(bool)
@@ -98,13 +154,15 @@ def standardize_price_history(frame: pd.DataFrame) -> pd.DataFrame:
     return output
 
 
-def standardize_financials(frame: pd.DataFrame) -> pd.DataFrame:
-    output = rename_to_standard(frame, FINANCIAL_ALIASES)
+def standardize_financials(frame: pd.DataFrame, mapping_key: str = "local_csv_v1") -> pd.DataFrame:
+    mapping = resolve_mapping(mapping_key)
+    output = rename_to_standard(frame, mapping.financial)
     output = ensure_datetime(output, ["period_end", "release_date"])
     return output
 
 
-def standardize_release_calendar(frame: pd.DataFrame) -> pd.DataFrame:
-    output = rename_to_standard(frame, RELEASE_ALIASES)
+def standardize_release_calendar(frame: pd.DataFrame, mapping_key: str = "local_csv_v1") -> pd.DataFrame:
+    mapping = resolve_mapping(mapping_key)
+    output = rename_to_standard(frame, mapping.release_calendar)
     output = ensure_datetime(output, ["period_end", "release_date"])
     return output

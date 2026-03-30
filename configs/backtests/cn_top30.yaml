@@ -11,7 +11,10 @@ initial_capital: 1000000
 benchmark_symbol: "^000300"
 rebalance_frequency: M
 max_single_weight: 0.08
+min_trade_notional: 5000
 costs:
   transaction_cost_bps: 20
   slippage_bps: 10
   minimum_fee: 0
+storage:
+  write_parquet: false

@@ -20,6 +20,7 @@ def export_html_report(
     nav_chart_path = save_nav_chart(artifacts.nav_history, output_path)
     drawdown_path = save_drawdown_chart(artifacts.nav_history, output_path)
     metrics_html = metrics_to_frame(artifacts.metrics).to_html(index=False, float_format=lambda x: f"{x:.6f}")
+
     ic_summary = artifacts.research_outputs.get("ic_summary")
     ic_summary_html = (
         ic_summary.to_html(index=False, float_format=lambda x: f"{x:.6f}")
@@ -31,6 +32,18 @@ def export_html_report(
         quantile.to_html(index=False, float_format=lambda x: f"{x:.6f}")
         if quantile is not None and not quantile.empty
         else "<p>No quantile return output.</p>"
+    )
+    attribution = artifacts.research_outputs.get("attribution_daily")
+    attribution_html = (
+        attribution.tail(30).to_html(index=False, float_format=lambda x: f"{x:.6f}")
+        if attribution is not None and not attribution.empty
+        else "<p>No attribution output.</p>"
+    )
+    constraint_stats = artifacts.research_outputs.get("constraint_stats")
+    constraint_html = (
+        constraint_stats.to_html(index=False, float_format=lambda x: f"{x:.6f}")
+        if constraint_stats is not None and not constraint_stats.empty
+        else "<p>No constraint stats.</p>"
     )
 
     config_text = json.dumps(config_snapshot, indent=2, ensure_ascii=False, default=str)
@@ -63,6 +76,10 @@ def export_html_report(
   {ic_summary_html}
   <h2>分层收益</h2>
   {quantile_html}
+  <h2>约束命中统计</h2>
+  {constraint_html}
+  <h2>归因（近30日）</h2>
+  {attribution_html}
 </body>
 </html>"""
     report_path = output_path / "report.html"

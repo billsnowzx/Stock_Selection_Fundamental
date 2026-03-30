@@ -1,0 +1,5 @@
+experiment_id: smoke_experiment
+base_backtest_config: configs/backtests/hk_top20.yaml
+output_root: outputs/experiments
+grid:
+  selection.top_n: [20]

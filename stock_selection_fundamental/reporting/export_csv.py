@@ -10,6 +10,8 @@ def export_csv_outputs(
     artifacts: BacktestArtifacts,
     output_dir: str | Path,
     config_snapshot: dict,
+    run_metadata: dict | None = None,
+    write_parquet: bool = False,
 ) -> Path:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -19,13 +21,24 @@ def export_csv_outputs(
     artifacts.holdings_history.to_csv(output_path / "holdings_history.csv", index=False)
     artifacts.selection_history.to_csv(output_path / "selection_history.csv", index=False)
 
+    if write_parquet:
+        artifacts.nav_history.to_parquet(output_path / "nav_history.parquet", index=False)
+        artifacts.trades.to_parquet(output_path / "trades.parquet", index=False)
+        artifacts.holdings_history.to_parquet(output_path / "holdings_history.parquet", index=False)
+        artifacts.selection_history.to_parquet(output_path / "selection_history.parquet", index=False)
+
     with (output_path / "metrics.json").open("w", encoding="utf-8") as handle:
-        json.dump(artifacts.metrics, handle, indent=2, ensure_ascii=False)
+        json.dump(artifacts.metrics, handle, indent=2, ensure_ascii=False, default=str)
     with (output_path / "config_snapshot.json").open("w", encoding="utf-8") as handle:
         json.dump(config_snapshot, handle, indent=2, ensure_ascii=False, default=str)
+    if run_metadata is not None:
+        with (output_path / "run_metadata.json").open("w", encoding="utf-8") as handle:
+            json.dump(run_metadata, handle, indent=2, ensure_ascii=False, default=str)
 
     for name, frame in artifacts.research_outputs.items():
         if frame is None:
             continue
         frame.to_csv(output_path / f"{name}.csv", index=False)
+        if write_parquet:
+            frame.to_parquet(output_path / f"{name}.parquet", index=False)
     return output_path

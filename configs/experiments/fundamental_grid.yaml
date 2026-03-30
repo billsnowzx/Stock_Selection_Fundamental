@@ -1,0 +1,17 @@
+experiment_id: fundamental_grid_v1
+base_backtest_config: configs/backtests/hk_top20.yaml
+output_root: outputs/experiments
+grid:
+  selection.top_n: [15, 20, 25]
+  transform.method: [zscore, rank]
+  factor_weights.roic: [1.0, 1.4]
+  factor_weights.net_margin: [1.0, 1.2]
+walk_forward:
+  windows:
+    - {start: 2023-01-03, end: 2023-12-29}
+    - {start: 2024-01-02, end: 2024-12-31}
+    - {start: 2025-01-02, end: 2025-12-31}
+regimes:
+  - {name: bull_like, start: 2023-01-03, end: 2023-08-31}
+  - {name: range_like, start: 2024-01-02, end: 2024-08-30}
+  - {name: recovery_like, start: 2025-01-02, end: 2025-12-31}

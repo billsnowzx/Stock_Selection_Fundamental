@@ -4,6 +4,10 @@ single_name_max_weight: 0.10
 max_turnover_per_rebalance: 1.00
 volatility_target: null
 max_drawdown_limit: null
+style_limits:
+  size: 0.45
+  value: 0.45
+  momentum: 0.45
 liquidity:
   enabled: true
   max_adv_participation: 0.1

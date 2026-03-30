@@ -26,6 +26,8 @@ class BacktestArtifacts:
     selection_history: pd.DataFrame
     metrics: dict[str, float]
     research_outputs: dict[str, pd.DataFrame] = field(default_factory=dict)
+    attribution: pd.DataFrame = field(default_factory=pd.DataFrame)
+    constraint_stats: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 @dataclass(slots=True)

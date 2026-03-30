@@ -1,131 +1,130 @@
 # Stock Selection Fundamental
 
-面向港股 / A 股的基本面量化研究框架，目标是把因子研究、选股、组合构建、回测、研究诊断和报告输出拆成清晰模块，并用配置文件驱动实验。
+港股 / A 股基本面量化研究框架（配置驱动、模块化、可扩展）。
 
-本仓库当前包含两套实现：
+当前仓库包含两套代码：
 
-- `stock_selection_fundamental/`：新版分层架构（本次重构主线）
-- `hk_stock_quant/`：旧版兼容实现（保留可运行能力，便于平滑迁移）
+- `stock_selection_fundamental/`：重构后的主框架（推荐使用）
+- `hk_stock_quant/`：历史兼容实现（保留可运行能力）
 
-## 模块结构
+## 1. 核心能力
+
+- 统一 `DataProvider` 接口（本地 CSV + AkShare HK/CN）
+- 可见性控制（`release_date <= signal_date`）
+- 数据标准化映射（字段、市场、行业）
+- 6 因子评分、月度调仓、交易成本与滑点
+- 组合约束：单票上限、持仓上下限、流动性约束、lot size、最小成交额
+- 风险能力：行业中性（可选）、风格软约束（占位可跑）
+- 归因：Brinson-lite（日频 market/industry/selection）
+- 研究：IC / Rank IC / 分层收益 / 稳定性
+- 报告：CSV + HTML
+- 基线回归：`baseline_metrics.json` 冻结与对比
+- 实验平台：参数网格、walk-forward、regime 测试
+
+## 2. 目录结构
 
 ```text
 stock_selection_fundamental/
-  providers/
-  universe/
-  factors/
-  signals/
-  portfolio/
-  risk/
-  backtest/
-  research/
-  reporting/
+  providers/   universe/   factors/   signals/
+  portfolio/   risk/       backtest/
+  research/    reporting/
 configs/
-  markets/
-  strategies/
-  backtests/
-  risk/
+  markets/ strategies/ backtests/ risk/ experiments/
+scripts/
+tests/
 ```
 
-## 安装
+## 3. 安装
 
 ```bash
 python -m pip install -e .
 ```
 
-## 数据准备
+## 4. 快速开始
 
-### 1. 生成演示数据
-
-```bash
-python -m stock_selection_fundamental.cli generate-demo-data
-```
-
-默认输出到 `sample_data/`，包含：
-
-- `security_master.csv`
-- `price_history.csv`
-- `financials.csv`
-- `release_calendar.csv`
-
-### 2. 同步 AkShare 港股
+### 4.1 生成 demo 数据
 
 ```bash
-python -m stock_selection_fundamental.cli sync-akshare-hk --symbols 0700.HK 0939.HK
+python -m stock_selection_fundamental.cli generate-demo-data --output-dir sample_data
 ```
 
-也可使用更大样本：
+### 4.2 准备 curated 快照（推荐先做）
 
 ```bash
-python -m stock_selection_fundamental.cli sync-akshare-hk --max-symbols 300
+python -m stock_selection_fundamental.cli prepare-curated \
+  --config configs/backtests/hk_top20.yaml \
+  --data-dir sample_data \
+  --output-dir data/curated/hk_phase1
 ```
 
-### 3. 同步 AkShare A 股
+### 4.3 运行回测（配置驱动）
 
 ```bash
-python -m stock_selection_fundamental.cli sync-akshare-cn --symbols 600519.SH 000001.SZ
+python -m stock_selection_fundamental.cli run-backtest \
+  --config configs/backtests/hk_top20.yaml \
+  --data-dir data/curated/hk_phase1 \
+  --output-dir outputs/hk_top20_phase1 \
+  --run-id baseline_hk
 ```
 
-## 运行回测（配置驱动）
+### 4.4 冻结并校验基线
 
 ```bash
-python -m stock_selection_fundamental.cli run-backtest --config configs/backtests/hk_top20.yaml
+python -m stock_selection_fundamental.cli freeze-baseline \
+  --metrics-file outputs/hk_top20_phase1/baseline_hk/metrics.json \
+  --output tests/baseline/baseline_metrics.json
+
+python -m stock_selection_fundamental.cli check-baseline \
+  --baseline tests/baseline/baseline_metrics.json \
+  --metrics-file outputs/hk_top20_phase1/baseline_hk/metrics.json \
+  --tolerance-bps 50
 ```
 
-同理可运行 A 股配置：
+### 4.5 运行实验
 
 ```bash
-python -m stock_selection_fundamental.cli run-backtest --config configs/backtests/cn_top30.yaml
+python -m stock_selection_fundamental.cli run-experiment \
+  --config configs/experiments/smoke.yaml
 ```
 
-## 配置说明
+## 5. CLI 命令
 
-- `configs/markets/*.yaml`：市场和股票池规则（板块、上市天数、停牌/流动性/ST 等）
-- `configs/strategies/*.yaml`：因子权重、标准化方式、选股规则、持仓构建方式
-- `configs/backtests/*.yaml`：回测区间、初始资金、成本滑点、输入输出路径
-- `configs/risk/*.yaml`：风险约束预留配置
+- `generate-demo-data`
+- `sync-akshare-hk`
+- `sync-akshare-cn`
+- `prepare-curated`
+- `run-backtest`
+- `run-experiment`
+- `freeze-baseline`
+- `check-baseline`
 
-## 当前实现重点
+## 6. 配置文件
 
-- 统一 `DataProvider` 接口与字段标准化映射
-- 财务数据按 `release_date <= 调仓日` 做时点控制
-- Universe 过滤：上市天数、停牌、缺失价格、流动性、ST(A股)、可选行业筛选
-- 因子层拆分：盈利/成长/杠杆/现金流 + winsorize/zscore/rank
-- Signals：加权综合打分 + topN / 百分位选股
-- Portfolio：等权/分数加权 + 单票上限 + 持仓上下限
-- Backtest：月度信号、次日开盘成交、成本/滑点、停牌跳过
-- Research：IC / Rank IC、分层收益、覆盖率/稳定性
-- Reporting：CSV + HTML 报告
+- `configs/markets/*.yaml`：市场与 universe 规则
+- `configs/strategies/*.yaml`：因子、标准化、选股、权重方法
+- `configs/backtests/*.yaml`：回测区间、成本、输出、存储
+- `configs/risk/*.yaml`：行业中性/流动性/风格约束
+- `configs/experiments/*.yaml`：参数网格、walk-forward、regime
 
-## 输出文件
+## 7. 输出说明
 
-回测输出目录（`output_dir`）包含：
+`run-backtest` 输出目录（`output_dir/run_id/`）包含：
 
-- `nav_history.csv`
-- `trades.csv`
-- `holdings_history.csv`
-- `selection_history.csv`
-- `metrics.json`
-- `config_snapshot.json`
-- `ic_summary.csv`
-- `ic_timeseries.csv`
-- `rolling_ic.csv`
-- `quantile_returns.csv`
-- `factor_coverage.csv`
-- `factor_moments.csv`
-- `factor_correlation.csv`
-- `nav_vs_benchmark.png`
-- `drawdown.png`
-- `report.html`
+- `nav_history.csv`, `trades.csv`, `holdings_history.csv`, `selection_history.csv`
+- `metrics.json`, `config_snapshot.json`, `run_metadata.json`
+- `ic_summary.csv`, `ic_timeseries.csv`, `rolling_ic.csv`
+- `quantile_returns.csv`, `factor_coverage.csv`, `factor_moments.csv`, `factor_correlation.csv`
+- `constraint_stats.csv`, `attribution_daily.csv`
+- `nav_vs_benchmark.png`, `drawdown.png`, `report.html`
 
-## 测试
+可选 parquet：在 backtest 配置中设置 `storage.write_parquet: true`。
+
+## 8. 测试
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-## 迁移说明
+## 9. 兼容性
 
-- 原命令 `python -m hk_stock_quant.cli ...` 仍可使用。
-- 建议新实验迁移到 `python -m stock_selection_fundamental.cli ...`。
-- 第二阶段接口已预留：行业中性、风格约束、风险归因、参数批量实验、walk-forward。
+历史命令 `python -m hk_stock_quant.cli ...` 仍可使用；新开发建议统一迁移到 `stock_selection_fundamental`。

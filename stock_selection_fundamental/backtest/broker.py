@@ -45,6 +45,8 @@ def execute_rebalance(
     cash: float,
     price_tables: dict[str, pd.DataFrame],
     cost_model: CostModel,
+    lot_sizes: pd.Series | None = None,
+    min_trade_notional: float = 0.0,
 ) -> tuple[dict[str, int], float, pd.DataFrame]:
     open_prices = price_tables["open"]
     close_prices = price_tables["close"]
@@ -53,6 +55,7 @@ def execute_rebalance(
     target_weights = target_weights[target_weights > 0].copy()
     if target_weights.sum() > 0:
         target_weights = target_weights / target_weights.sum()
+    lot_sizes = lot_sizes if lot_sizes is not None else pd.Series(dtype=int)
 
     all_symbols = set(holdings) | set(target_weights.index)
     current_symbols = {symbol for symbol, shares in holdings.items() if shares > 0}
@@ -68,7 +71,6 @@ def execute_rebalance(
 
     trades: list[dict[str, float | str | pd.Timestamp | int]] = []
 
-    # Always try to liquidate names explicitly removed from target set first.
     for symbol in sorted(current_symbols - target_symbols):
         if symbol not in tradable_symbols:
             continue
@@ -77,6 +79,8 @@ def execute_rebalance(
             continue
         sell_price = cost_model.apply_sell_slippage(float(open_prices.at[date, symbol]))
         notional = shares * sell_price
+        if notional < min_trade_notional:
+            continue
         fee = cost_model.fee(notional)
         cash += notional - fee
         holdings[symbol] = 0
@@ -89,6 +93,7 @@ def execute_rebalance(
                 "price": sell_price,
                 "notional": notional,
                 "fee": fee,
+                "reason": "liquidate_removed",
             }
         )
 
@@ -107,7 +112,8 @@ def execute_rebalance(
     for symbol, target_weight in tradable_target_weights.items():
         raw_open = float(open_prices.at[date, symbol])
         buy_price = cost_model.apply_buy_slippage(raw_open)
-        desired_shares[symbol] = int((tradable_budget * float(target_weight)) // buy_price)
+        desired = int((tradable_budget * float(target_weight)) // buy_price)
+        desired_shares[symbol] = _round_down_lot(desired, int(lot_sizes.get(symbol, 1)))
 
     for symbol in sorted(tradable_symbols):
         current_shares = int(holdings.get(symbol, 0))
@@ -116,8 +122,14 @@ def execute_rebalance(
         if delta >= 0:
             continue
         shares_to_sell = abs(delta)
+        lot_size = int(lot_sizes.get(symbol, 1))
+        shares_to_sell = _round_down_lot(shares_to_sell, lot_size)
+        if shares_to_sell <= 0:
+            continue
         sell_price = cost_model.apply_sell_slippage(float(open_prices.at[date, symbol]))
         notional = shares_to_sell * sell_price
+        if notional < min_trade_notional:
+            continue
         fee = cost_model.fee(notional)
         cash += notional - fee
         holdings[symbol] = current_shares - shares_to_sell
@@ -130,6 +142,7 @@ def execute_rebalance(
                 "price": sell_price,
                 "notional": notional,
                 "fee": fee,
+                "reason": "rebalance_down",
             }
         )
 
@@ -139,13 +152,16 @@ def execute_rebalance(
         delta = target_shares - current_shares
         if delta <= 0:
             continue
+        lot_size = int(lot_sizes.get(symbol, 1))
         buy_price = cost_model.apply_buy_slippage(float(open_prices.at[date, symbol]))
         per_share_cash = buy_price * (1 + cost_model.transaction_cost_bps / 10000.0)
         affordable = int(cash // per_share_cash)
-        shares_to_buy = min(delta, max(affordable, 0))
+        shares_to_buy = _round_down_lot(min(delta, max(affordable, 0)), lot_size)
         if shares_to_buy <= 0:
             continue
         notional = shares_to_buy * buy_price
+        if notional < min_trade_notional:
+            continue
         fee = cost_model.fee(notional)
         cash -= notional + fee
         holdings[symbol] = current_shares + shares_to_buy
@@ -158,6 +174,7 @@ def execute_rebalance(
                 "price": buy_price,
                 "notional": notional,
                 "fee": fee,
+                "reason": "rebalance_up",
             }
         )
 
@@ -165,3 +182,10 @@ def execute_rebalance(
     if not trade_frame.empty:
         trade_frame = trade_frame.sort_values(["date", "symbol", "side"]).reset_index(drop=True)
     return holdings, float(cash), trade_frame
+
+
+def _round_down_lot(shares: int, lot_size: int) -> int:
+    if shares <= 0:
+        return 0
+    lot = max(int(lot_size), 1)
+    return (int(shares) // lot) * lot

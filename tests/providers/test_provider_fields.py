@@ -19,11 +19,21 @@ class ProviderFieldTests(unittest.TestCase):
             prices = provider.get_price_history(start="2023-01-01", end="2023-12-31")
             releases = provider.get_release_calendar(start="2023-01-01", end="2024-12-31")
             snapshot = provider.get_financials(symbols=["0001.HK"], as_of_date=pd.Timestamp("2024-08-31"))
+            financial_history = provider.get_financial_history(symbols=["0001.HK"])
+            lot_sizes = provider.get_lot_sizes(["0001.HK"])
+            industry = provider.get_industry_mapping(["0001.HK"], as_of_date=pd.Timestamp("2024-08-31"))
+            adjustments = provider.get_adjustment_factors(["0001.HK"])
+            actions = provider.get_corporate_actions(["0001.HK"])
 
             self.assertTrue({"symbol", "list_date", "market", "exchange"}.issubset(master.columns))
             self.assertTrue({"date", "symbol", "open", "close", "is_suspended"}.issubset(prices.columns))
             self.assertTrue({"symbol", "period_end", "release_date"}.issubset(releases.columns))
             self.assertTrue({"symbol", "period_end", "revenue", "net_income"}.issubset(snapshot.columns))
+            self.assertTrue({"symbol", "period_end"}.issubset(financial_history.columns))
+            self.assertTrue({"symbol", "lot_size"}.issubset(lot_sizes.columns))
+            self.assertTrue({"symbol", "industry_std"}.issubset(industry.columns))
+            self.assertTrue({"date", "symbol", "adj_factor"}.issubset(adjustments.columns))
+            self.assertTrue({"ex_date", "symbol", "action_type", "ratio", "cash_dividend"}.issubset(actions.columns))
             self.assertLessEqual(snapshot.iloc[0]["release_date"], pd.Timestamp("2024-08-31"))
 
 

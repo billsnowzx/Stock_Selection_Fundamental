@@ -9,8 +9,16 @@ from hk_stock_quant.demo_data import write_demo_dataset
 
 from .backtest.engine import BacktestEngine
 from .config import load_config_bundle
-from .providers import AkshareCNDataProvider, AkshareHKDataProvider, LocalCSVDataProvider
+from .providers import (
+    AkshareCNDataProvider,
+    AkshareHKDataProvider,
+    LocalCSVDataProvider,
+    prepare_curated_dataset,
+)
 from .reporting import export_csv_outputs, export_html_report
+from .research.experiments import run_experiment_suite
+from .research.regression import compare_baseline_metrics, freeze_baseline_metrics
+from .runtime import generate_run_id, hash_config_bundle, hash_data_dir
 
 
 logger = logging.getLogger(__name__)
@@ -49,6 +57,24 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--config", default="configs/backtests/hk_top20.yaml")
     run.add_argument("--data-dir", default="")
     run.add_argument("--output-dir", default="")
+    run.add_argument("--run-id", default="")
+
+    curated = subparsers.add_parser("prepare-curated", help="Prepare curated dataset with visibility controls.")
+    curated.add_argument("--config", default="configs/backtests/hk_top20.yaml")
+    curated.add_argument("--data-dir", default="")
+    curated.add_argument("--output-dir", default="")
+
+    experiment = subparsers.add_parser("run-experiment", help="Run experiment suite with parameter grid.")
+    experiment.add_argument("--config", default="configs/experiments/fundamental_grid.yaml")
+
+    freeze = subparsers.add_parser("freeze-baseline", help="Freeze baseline metrics for regression checks.")
+    freeze.add_argument("--metrics-file", default="outputs/hk_top20/metrics.json")
+    freeze.add_argument("--output", default="tests/baseline/baseline_metrics.json")
+
+    check = subparsers.add_parser("check-baseline", help="Compare current metrics against frozen baseline.")
+    check.add_argument("--baseline", default="tests/baseline/baseline_metrics.json")
+    check.add_argument("--metrics-file", default="outputs/hk_top20/metrics.json")
+    check.add_argument("--tolerance-bps", type=float, default=200.0)
     return parser
 
 
@@ -59,7 +85,13 @@ def _configure_logging(level: str) -> None:
     )
 
 
-def _run_backtest(config_path: str, data_dir_override: str, output_dir_override: str) -> None:
+def _make_provider(provider_name: str, data_dir: Path):
+    if provider_name not in {"local_csv", "akshare_hk", "akshare_cn"}:
+        raise ValueError(f"Unsupported provider: {provider_name}")
+    return LocalCSVDataProvider(data_dir)
+
+
+def _run_backtest(config_path: str, data_dir_override: str, output_dir_override: str, run_id_override: str) -> dict[str, float]:
     bundle = load_config_bundle(config_path)
     if data_dir_override:
         bundle.backtest["data_dir"] = data_dir_override
@@ -68,19 +100,76 @@ def _run_backtest(config_path: str, data_dir_override: str, output_dir_override:
 
     provider_name = str(bundle.backtest.get("provider", "local_csv")).lower()
     data_dir = Path(bundle.backtest.get("data_dir", "sample_data"))
-    if provider_name not in {"local_csv", "akshare_hk", "akshare_cn"}:
-        raise ValueError(f"Unsupported provider for run-backtest: {provider_name}")
-    provider = LocalCSVDataProvider(data_dir)
+    provider = _make_provider(provider_name, data_dir)
 
-    logger.info("Running backtest with config: %s", Path(config_path).resolve())
+    run_id = run_id_override or generate_run_id(prefix="bt")
+    logger.info("Running backtest with config=%s run_id=%s", Path(config_path).resolve(), run_id)
     engine = BacktestEngine(config_bundle=bundle)
     artifacts = engine.run(provider)
-    output_dir = bundle.backtest.get("output_dir", "outputs")
-    output_path = export_csv_outputs(artifacts=artifacts, output_dir=output_dir, config_snapshot=bundle.as_dict())
+
+    base_output_dir = Path(bundle.backtest.get("output_dir", "outputs"))
+    output_dir = base_output_dir / run_id
+    run_metadata = {
+        "run_id": run_id,
+        "provider": provider_name,
+        "data_dir": str(data_dir.resolve()),
+        "output_dir": str(output_dir.resolve()),
+        "data_hash": hash_data_dir(data_dir),
+        "config_hash": hash_config_bundle(bundle),
+    }
+
+    write_parquet = bool(bundle.backtest.get("storage", {}).get("write_parquet", False))
+    output_path = export_csv_outputs(
+        artifacts=artifacts,
+        output_dir=output_dir,
+        config_snapshot=bundle.as_dict(),
+        run_metadata=run_metadata,
+        write_parquet=write_parquet,
+    )
     report_path = export_html_report(artifacts=artifacts, output_dir=output_path, config_snapshot=bundle.as_dict())
     print(json.dumps(artifacts.metrics, indent=2, ensure_ascii=False))
     print(f"CSV outputs: {output_path.resolve()}")
     print(f"HTML report: {report_path.resolve()}")
+    return artifacts.metrics
+
+
+def _prepare_curated(config_path: str, data_dir_override: str, output_dir_override: str) -> None:
+    bundle = load_config_bundle(config_path)
+    if data_dir_override:
+        bundle.backtest["data_dir"] = data_dir_override
+    source_dir = Path(bundle.backtest.get("data_dir", "sample_data"))
+    provider = LocalCSVDataProvider(source_dir)
+
+    output_dir = (
+        Path(output_dir_override)
+        if output_dir_override
+        else Path("data/curated") / str(bundle.backtest.get("name", "curated"))
+    )
+    result = prepare_curated_dataset(provider=provider, config_bundle=bundle, output_dir=output_dir)
+    print(f"Curated dataset prepared at: {result.output_dir.resolve()}")
+    print(json.dumps(result.manifest, indent=2, ensure_ascii=False, default=str))
+
+
+def _run_experiment(config_path: str) -> None:
+    result = run_experiment_suite(config_path)
+    print(f"Experiment ID: {result.experiment_id}")
+    print(f"Output Dir: {result.output_dir.resolve()}")
+    print(result.summary.head(20).to_string(index=False))
+
+
+def _freeze_baseline(metrics_file: str, output: str) -> None:
+    metrics = json.loads(Path(metrics_file).read_text(encoding="utf-8"))
+    path = freeze_baseline_metrics(metrics=metrics, output_path=output)
+    print(f"Baseline frozen: {path.resolve()}")
+
+
+def _check_baseline(baseline: str, metrics_file: str, tolerance_bps: float) -> None:
+    metrics = json.loads(Path(metrics_file).read_text(encoding="utf-8"))
+    result = compare_baseline_metrics(baseline_path=baseline, current_metrics=metrics, tolerance_bps=tolerance_bps)
+    print(result.details.to_string(index=False))
+    if not result.passed:
+        raise SystemExit("Baseline regression check failed.")
+    print("Baseline regression check passed.")
 
 
 def main() -> None:
@@ -126,10 +215,27 @@ def main() -> None:
         print(f"AkShare CN dataset synced to {output_path.resolve()}")
         return
 
+    if args.command == "prepare-curated":
+        _prepare_curated(args.config, args.data_dir, args.output_dir)
+        return
+
+    if args.command == "run-experiment":
+        _run_experiment(args.config)
+        return
+
+    if args.command == "freeze-baseline":
+        _freeze_baseline(args.metrics_file, args.output)
+        return
+
+    if args.command == "check-baseline":
+        _check_baseline(args.baseline, args.metrics_file, args.tolerance_bps)
+        return
+
     _run_backtest(
         config_path=args.config,
         data_dir_override=args.data_dir,
         output_dir_override=args.output_dir,
+        run_id_override=args.run_id,
     )
 
 

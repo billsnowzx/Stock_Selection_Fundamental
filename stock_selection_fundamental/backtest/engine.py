@@ -14,6 +14,9 @@ from ..providers.base import DataProvider
 from ..research.ic import compute_ic_bundle
 from ..research.quantiles import compute_quantile_forward_returns
 from ..research.stability import compute_stability_bundle
+from ..risk.attribution import brinson_lite_attribution
+from ..risk.exposures import estimate_style_exposure
+from ..risk.neutralization import neutralize_by_industry
 from ..signals.composite_score import compute_composite_score
 from ..signals.ranking import rank_and_select
 from ..types import BacktestArtifacts
@@ -36,6 +39,7 @@ class BacktestEngine:
         backtest_cfg = config.backtest
         strategy_cfg = config.strategy
         market_cfg = config.market
+        risk_cfg = config.risk or {}
 
         start = pd.Timestamp(backtest_cfg["start"])
         end = pd.Timestamp(backtest_cfg["end"])
@@ -57,6 +61,15 @@ class BacktestEngine:
             slippage_bps=float(cost_cfg.get("slippage_bps", 10.0)),
             minimum_fee=float(cost_cfg.get("minimum_fee", 0.0)),
         )
+        min_trade_notional = float(backtest_cfg.get("min_trade_notional", 0.0))
+        liquidity_cfg = risk_cfg.get("liquidity", {})
+        max_adv_participation = (
+            float(liquidity_cfg.get("max_adv_participation", 0.1))
+            if bool(liquidity_cfg.get("enabled", False))
+            else None
+        )
+        style_limits = risk_cfg.get("style_limits", {})
+        industry_neutral = bool(risk_cfg.get("industry_neutral", False))
 
         price_history = provider.get_price_history(start=start, end=end)
         benchmark_history = provider.get_benchmark_history(benchmark_symbol, start=start, end=end)
@@ -64,6 +77,7 @@ class BacktestEngine:
             exists = not price_history[price_history["symbol"] == benchmark_symbol].empty
             if not exists:
                 price_history = pd.concat([price_history, benchmark_history], ignore_index=True)
+        price_history = _apply_adjustment_to_prices(price_history, provider.get_adjustment_factors(start=start, end=end))
         if price_history.empty:
             raise ValueError("No price history available in the requested interval.")
 
@@ -75,6 +89,17 @@ class BacktestEngine:
         master = provider.get_security_master()
         if master.empty:
             raise ValueError("Security master is empty.")
+        industry_map = provider.get_industry_mapping(master["symbol"].tolist(), as_of_date=end)
+        if not industry_map.empty:
+            master = master.drop(columns=["industry_std"], errors="ignore").merge(
+                industry_map[["symbol", "industry_std"]],
+                on="symbol",
+                how="left",
+            )
+        master["industry_std"] = master.get("industry_std", master.get("industry", "UNKNOWN")).fillna("UNKNOWN")
+
+        lot_sizes = provider.get_lot_sizes(master["symbol"].tolist())
+        lot_size_series = lot_sizes.set_index("symbol")["lot_size"] if not lot_sizes.empty else pd.Series(dtype=int)
 
         holdings: dict[str, int] = {}
         cash = initial_capital
@@ -85,6 +110,8 @@ class BacktestEngine:
         selection_rows: list[dict[str, Any]] = []
         scored_snapshots: dict[pd.Timestamp, pd.DataFrame] = {}
         turnover_series: list[float] = []
+        capacity_utilization: list[float] = []
+        constraint_rows: list[dict[str, Any]] = []
         prev_target = pd.Series(dtype=float)
 
         factor_weights: dict[str, float] = strategy_cfg.get("factor_weights", {})
@@ -138,7 +165,7 @@ class BacktestEngine:
                         target_weights = pd.Series(dtype=float)
                     else:
                         financials = financials.merge(
-                            universe[["symbol", "industry"]],
+                            universe[["symbol", "industry_std"]],
                             on="symbol",
                             how="left",
                         )
@@ -160,12 +187,43 @@ class BacktestEngine:
                             top_percentile=float(top_percentile) if top_percentile is not None else None,
                             min_selection=min_selection,
                         )
+
+                        tradable_symbols = set(
+                            universe.loc[universe["is_tradable"].fillna(False), "symbol"].tolist()
+                        )
+                        style_exposure = estimate_style_exposure(selected)
                         target_weights = build_target_weights(
                             selected=selected,
                             method=weight_method,
                             max_weight=max_weight,
                             min_holdings=min_holdings,
                             max_holdings=max_holdings_int,
+                            tradable_symbols=tradable_symbols,
+                            portfolio_value=(cash + portfolio_market_value(holdings, date, price_tables["close"])),
+                            max_adv_participation=max_adv_participation,
+                            style_exposure=style_exposure,
+                            style_limits=style_limits,
+                        )
+
+                        if industry_neutral and not target_weights.empty:
+                            symbol_industry = selected.set_index("symbol").get("industry_std", pd.Series(dtype=object))
+                            benchmark_weights = _benchmark_industry_weights_on_date(
+                                date=date,
+                                universe=universe,
+                            )
+                            target_weights = neutralize_by_industry(
+                                weights=target_weights,
+                                symbol_industry=symbol_industry,
+                                benchmark_industry_weights=benchmark_weights,
+                            )
+
+                        capacity_utilization.append(
+                            _estimate_capacity_utilization(
+                                target_weights=target_weights,
+                                selected=selected,
+                                portfolio_value=(cash + portfolio_market_value(holdings, date, price_tables["close"])),
+                                max_adv_participation=max_adv_participation,
+                            )
                         )
 
                 scored_snapshots[date] = scored.copy()
@@ -181,8 +239,19 @@ class BacktestEngine:
                             "target_weight": float(target_weights.get(row["symbol"], 0.0)),
                             "composite_score": float(row.get("composite_score", float("nan"))),
                             "valid_factor_count": int(row.get("valid_factor_count", 0)),
+                            "industry": row.get("industry_std", row.get("industry", "UNKNOWN")),
                         }
                     )
+
+                constraint_rows.append(
+                    {
+                        "date": date,
+                        "selected_count": int(len(selected)),
+                        "target_count": int(len(target_weights)),
+                        "max_weight_observed": float(target_weights.max()) if not target_weights.empty else 0.0,
+                        "industry_neutral": industry_neutral,
+                    }
+                )
 
                 exec_date = execution_map.get(date)
                 if exec_date is not None:
@@ -197,6 +266,8 @@ class BacktestEngine:
                     cash=cash,
                     price_tables=price_tables,
                     cost_model=cost_model,
+                    lot_sizes=lot_size_series,
+                    min_trade_notional=min_trade_notional,
                 )
                 if not trades.empty:
                     trade_frames.append(trades)
@@ -228,6 +299,7 @@ class BacktestEngine:
                     continue
                 close_price = _last_price(symbol=symbol, date=date, close_prices=price_tables["close"])
                 market_value = shares * close_price
+                industry = master.loc[master["symbol"] == symbol, "industry_std"]
                 holdings_rows.append(
                     {
                         "date": date,
@@ -236,6 +308,7 @@ class BacktestEngine:
                         "close_price": close_price,
                         "market_value": market_value,
                         "portfolio_weight": market_value / total_equity if total_equity else 0.0,
+                        "industry": industry.iloc[0] if not industry.empty else "UNKNOWN",
                     }
                 )
 
@@ -244,6 +317,8 @@ class BacktestEngine:
         holdings_history = pd.DataFrame(holdings_rows)
         selection_history = pd.DataFrame(selection_rows)
         metrics = compute_performance_metrics(nav_history=nav_history, turnover_series=turnover_series)
+        if capacity_utilization:
+            metrics["capacity_utilization"] = float(pd.Series(capacity_utilization).mean())
 
         factor_names = list(factor_weights.keys())
         ic_bundle = compute_ic_bundle(
@@ -260,6 +335,12 @@ class BacktestEngine:
             quantiles=int(strategy_cfg.get("quantiles", 5)),
         )
         stability_bundle = compute_stability_bundle(scored_snapshots=scored_snapshots, factor_names=factor_names)
+        attribution = brinson_lite_attribution(
+            nav_history=nav_history,
+            holdings_history=holdings_history,
+            price_history=price_history,
+            security_master=master,
+        )
 
         research_outputs = {
             "ic_timeseries": ic_bundle.get("ic_timeseries", pd.DataFrame()),
@@ -269,7 +350,10 @@ class BacktestEngine:
             "factor_coverage": stability_bundle.get("coverage", pd.DataFrame()),
             "factor_moments": stability_bundle.get("moments", pd.DataFrame()),
             "factor_correlation": stability_bundle.get("correlation", pd.DataFrame()),
+            "constraint_stats": pd.DataFrame(constraint_rows),
+            "attribution_daily": attribution,
         }
+        constraint_stats = pd.DataFrame(constraint_rows)
         logger.info("Backtest finished with %s trading days and %s trades.", len(nav_history), len(trades))
         return BacktestArtifacts(
             nav_history=nav_history,
@@ -278,7 +362,52 @@ class BacktestEngine:
             selection_history=selection_history,
             metrics=metrics,
             research_outputs=research_outputs,
+            attribution=attribution,
+            constraint_stats=constraint_stats,
         )
+
+
+def _apply_adjustment_to_prices(price_history: pd.DataFrame, adjustment: pd.DataFrame) -> pd.DataFrame:
+    if price_history.empty or adjustment.empty:
+        return price_history
+    adjusted = price_history.copy()
+    factor = adjustment.copy()
+    factor["date"] = pd.to_datetime(factor["date"], errors="coerce")
+    factor["adj_factor"] = pd.to_numeric(factor["adj_factor"], errors="coerce").fillna(1.0)
+    merged = adjusted.merge(factor[["date", "symbol", "adj_factor"]], on=["date", "symbol"], how="left")
+    merged["adj_factor"] = merged["adj_factor"].fillna(1.0)
+    for col in ("open", "high", "low", "close"):
+        if col in merged.columns:
+            merged[col] = pd.to_numeric(merged[col], errors="coerce") * merged["adj_factor"]
+    return merged.drop(columns=["adj_factor"])
+
+
+def _benchmark_industry_weights_on_date(date: pd.Timestamp, universe: pd.DataFrame) -> pd.Series:
+    frame = universe.copy()
+    if "industry_std" not in frame.columns or frame.empty:
+        return pd.Series(dtype=float)
+    counts = frame.groupby("industry_std")["symbol"].nunique()
+    total = counts.sum()
+    if total <= 0:
+        return pd.Series(dtype=float)
+    return counts / total
+
+
+def _estimate_capacity_utilization(
+    target_weights: pd.Series,
+    selected: pd.DataFrame,
+    portfolio_value: float,
+    max_adv_participation: float | None,
+) -> float:
+    if target_weights.empty or max_adv_participation is None or "avg_turnover_lookback" not in selected.columns:
+        return 0.0
+    adv = selected.set_index("symbol")["avg_turnover_lookback"].reindex(target_weights.index).fillna(0.0)
+    max_capacity = adv * float(max_adv_participation)
+    used_notional = target_weights * float(portfolio_value)
+    ratio = (used_notional / max_capacity.where(max_capacity > 0, pd.NA)).dropna()
+    if ratio.empty:
+        return 0.0
+    return float(ratio.mean())
 
 
 def _last_price(symbol: str, date: pd.Timestamp, close_prices: pd.DataFrame) -> float:
