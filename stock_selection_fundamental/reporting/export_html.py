@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 from ..types import BacktestArtifacts
 from .charts import save_drawdown_chart, save_nav_chart
 from .tables import metrics_to_frame
@@ -33,6 +35,7 @@ def export_html_report(
         if quantile is not None and not quantile.empty
         else "<p>No quantile return output.</p>"
     )
+    monthly_selection_html = _build_monthly_selection_html(artifacts.selection_history)
     attribution = artifacts.research_outputs.get("attribution_daily")
     attribution_html = (
         attribution.tail(30).to_html(index=False, float_format=lambda x: f"{x:.6f}")
@@ -88,6 +91,8 @@ def export_html_report(
   {ic_summary_html}
   <h2>分层收益</h2>
   {quantile_html}
+  <h2>按月选股清单</h2>
+  {monthly_selection_html}
   <h2>约束命中统计</h2>
   {constraint_html}
   <h2>归因摘要</h2>
@@ -101,3 +106,35 @@ def export_html_report(
     report_path = output_path / "report.html"
     report_path.write_text(html, encoding="utf-8")
     return report_path
+
+
+def _build_monthly_selection_html(selection_history: pd.DataFrame) -> str:
+    if selection_history.empty:
+        return "<p>No selection history output.</p>"
+    if "signal_date" not in selection_history.columns or "symbol" not in selection_history.columns:
+        return "<p>No selection history output.</p>"
+
+    frame = selection_history.copy()
+    frame["signal_date"] = pd.to_datetime(frame["signal_date"], errors="coerce")
+    frame["symbol"] = frame["symbol"].astype(str)
+    frame = frame.dropna(subset=["signal_date", "symbol"])
+    if frame.empty:
+        return "<p>No selection history output.</p>"
+
+    frame["rebalance_month"] = frame["signal_date"].dt.strftime("%Y-%m")
+    if "rank" in frame.columns:
+        frame["rank"] = pd.to_numeric(frame["rank"], errors="coerce")
+        frame = frame.sort_values(["rebalance_month", "rank", "symbol"])
+    else:
+        frame = frame.sort_values(["rebalance_month", "symbol"])
+
+    monthly = (
+        frame.drop_duplicates(subset=["rebalance_month", "symbol"], keep="first")
+        .groupby("rebalance_month")
+        .agg(
+            selected_count=("symbol", "size"),
+            selected_companies=("symbol", lambda s: ", ".join(s.astype(str))),
+        )
+        .reset_index()
+    )
+    return monthly.to_html(index=False)
