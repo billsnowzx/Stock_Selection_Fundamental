@@ -1,0 +1,20 @@
+﻿[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hk-stock-quant"
+version = "0.1.0"
+description = "HK equity fundamental stock selection and backtesting framework."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "akshare>=1.16",
+  "matplotlib>=3.8",
+  "numpy>=1.26",
+  "pandas>=2.2",
+  "pyarrow>=15.0",
+]
+
+[tool.setuptools]
+packages = ["hk_stock_quant", "hk_stock_quant.data"]

@@ -1,0 +1,8 @@
+﻿__pycache__/
+*.pyc
+.pytest_cache/
+outputs/
+outputs_real*/
+sample_data/
+real_data_hk*/
+.venv/
