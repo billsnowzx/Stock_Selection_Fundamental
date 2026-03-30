@@ -78,6 +78,10 @@ class BacktestEngine:
             if not exists:
                 price_history = pd.concat([price_history, benchmark_history], ignore_index=True)
         price_history = _apply_adjustment_to_prices(price_history, provider.get_adjustment_factors(start=start, end=end))
+        corporate_actions = provider.get_corporate_actions(start=start, end=end).copy()
+        if not corporate_actions.empty:
+            corporate_actions["ex_date"] = pd.to_datetime(corporate_actions["ex_date"], errors="coerce")
+            corporate_actions = corporate_actions.sort_values(["ex_date", "symbol"]).reset_index(drop=True)
         if price_history.empty:
             raise ValueError("No price history available in the requested interval.")
 
@@ -112,6 +116,7 @@ class BacktestEngine:
         turnover_series: list[float] = []
         capacity_utilization: list[float] = []
         constraint_rows: list[dict[str, Any]] = []
+        corporate_action_rows: list[dict[str, Any]] = []
         prev_target = pd.Series(dtype=float)
 
         factor_weights: dict[str, float] = strategy_cfg.get("factor_weights", {})
@@ -142,6 +147,16 @@ class BacktestEngine:
         max_holdings_int = int(max_holdings) if max_holdings is not None else None
 
         for date in trading_dates:
+            if not corporate_actions.empty:
+                cash, corporate_events = _apply_corporate_actions_on_date(
+                    date=date,
+                    holdings=holdings,
+                    cash=cash,
+                    actions=corporate_actions,
+                )
+                if corporate_events:
+                    corporate_action_rows.extend(corporate_events)
+
             if date in signal_dates:
                 trading_status = provider.get_trading_status(master["symbol"].tolist(), date)
                 universe = build_universe(
@@ -352,6 +367,7 @@ class BacktestEngine:
             "factor_correlation": stability_bundle.get("correlation", pd.DataFrame()),
             "constraint_stats": pd.DataFrame(constraint_rows),
             "attribution_daily": attribution,
+            "corporate_action_ledger": pd.DataFrame(corporate_action_rows),
         }
         constraint_stats = pd.DataFrame(constraint_rows)
         logger.info("Backtest finished with %s trading days and %s trades.", len(nav_history), len(trades))
@@ -432,3 +448,56 @@ def _benchmark_nav(benchmark_symbol: str, date: pd.Timestamp, close_prices: pd.D
     if current.empty:
         return 1.0
     return float(current.iloc[-1] / base)
+
+
+def _apply_corporate_actions_on_date(
+    date: pd.Timestamp,
+    holdings: dict[str, int],
+    cash: float,
+    actions: pd.DataFrame,
+) -> tuple[float, list[dict[str, Any]]]:
+    day_actions = actions[actions["ex_date"] == date]
+    if day_actions.empty:
+        return cash, []
+    event_rows: list[dict[str, Any]] = []
+    for _, row in day_actions.iterrows():
+        symbol = str(row["symbol"])
+        shares = int(holdings.get(symbol, 0))
+        if shares <= 0:
+            continue
+        action_type = str(row.get("action_type", "")).lower()
+        ratio = float(pd.to_numeric(row.get("ratio"), errors="coerce") if "ratio" in row else 1.0)
+        ratio = ratio if ratio > 0 else 1.0
+        cash_dividend = float(pd.to_numeric(row.get("cash_dividend"), errors="coerce") if "cash_dividend" in row else 0.0)
+
+        old_shares = shares
+        if action_type in {"split", "stock_dividend", "bonus"}:
+            new_shares = int(round(old_shares * ratio))
+            holdings[symbol] = max(new_shares, 0)
+            event_rows.append(
+                {
+                    "date": date,
+                    "symbol": symbol,
+                    "action_type": action_type or "split_like",
+                    "old_shares": old_shares,
+                    "new_shares": holdings[symbol],
+                    "ratio": ratio,
+                    "cash_delta": 0.0,
+                }
+            )
+
+        if cash_dividend != 0:
+            cash_delta = old_shares * cash_dividend
+            cash += cash_delta
+            event_rows.append(
+                {
+                    "date": date,
+                    "symbol": symbol,
+                    "action_type": "cash_dividend",
+                    "old_shares": old_shares,
+                    "new_shares": holdings.get(symbol, old_shares),
+                    "ratio": 1.0,
+                    "cash_delta": cash_delta,
+                }
+            )
+    return float(cash), event_rows

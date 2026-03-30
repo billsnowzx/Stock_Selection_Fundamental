@@ -14,6 +14,7 @@ def main() -> None:
     parser.add_argument("--max-symbols", type=int, default=300)
     parser.add_argument("--benchmark-symbol", default="HSI")
     parser.add_argument("--sleep-seconds", type=float, default=0.2)
+    parser.add_argument("--full-sync", action="store_true")
     args = parser.parse_args()
 
     symbol_list = args.symbols if args.symbols else None
@@ -25,6 +26,7 @@ def main() -> None:
         max_symbols=None if symbol_list else args.max_symbols,
         benchmark_symbol=args.benchmark_symbol,
         sleep_seconds=args.sleep_seconds,
+        incremental=not args.full_sync,
     )
     print(f"HK dataset synced to {output.resolve()}")
 

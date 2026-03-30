@@ -45,6 +45,12 @@ def export_html_report(
         if constraint_stats is not None and not constraint_stats.empty
         else "<p>No constraint stats.</p>"
     )
+    corporate_actions = artifacts.research_outputs.get("corporate_action_ledger")
+    corporate_actions_html = (
+        corporate_actions.tail(30).to_html(index=False, float_format=lambda x: f"{x:.6f}")
+        if corporate_actions is not None and not corporate_actions.empty
+        else "<p>No corporate action events in period.</p>"
+    )
 
     config_text = json.dumps(config_snapshot, indent=2, ensure_ascii=False, default=str)
     html = f"""<!doctype html>
@@ -80,6 +86,8 @@ def export_html_report(
   {constraint_html}
   <h2>归因（近30日）</h2>
   {attribution_html}
+  <h2>公司行为（近30条）</h2>
+  {corporate_actions_html}
 </body>
 </html>"""
     report_path = output_path / "report.html"

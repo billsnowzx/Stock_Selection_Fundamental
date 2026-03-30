@@ -43,6 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     sync_hk.add_argument("--max-symbols", type=int, default=300)
     sync_hk.add_argument("--benchmark-symbol", default="HSI")
     sync_hk.add_argument("--sleep-seconds", type=float, default=0.2)
+    sync_hk.add_argument("--full-sync", action="store_true", help="Disable incremental sync and rebuild from start/end.")
 
     sync_cn = subparsers.add_parser("sync-akshare-cn", help="Sync CN market dataset with AkShare.")
     sync_cn.add_argument("--output-dir", default="data/curated/cn")
@@ -52,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     sync_cn.add_argument("--max-symbols", type=int, default=500)
     sync_cn.add_argument("--benchmark-symbol", default="sh000300")
     sync_cn.add_argument("--sleep-seconds", type=float, default=0.1)
+    sync_cn.add_argument("--full-sync", action="store_true", help="Disable incremental sync and rebuild from start/end.")
 
     run = subparsers.add_parser("run-backtest", help="Run config-driven backtest.")
     run.add_argument("--config", default="configs/backtests/hk_top20.yaml")
@@ -197,6 +199,7 @@ def main() -> None:
             max_symbols=None if symbol_list else args.max_symbols,
             benchmark_symbol=args.benchmark_symbol,
             sleep_seconds=args.sleep_seconds,
+            incremental=not args.full_sync,
         )
         print(f"AkShare HK dataset synced to {output_path.resolve()}")
         return
@@ -211,6 +214,7 @@ def main() -> None:
             max_symbols=None if symbol_list else args.max_symbols,
             benchmark_symbol=args.benchmark_symbol,
             sleep_seconds=args.sleep_seconds,
+            incremental=not args.full_sync,
         )
         print(f"AkShare CN dataset synced to {output_path.resolve()}")
         return

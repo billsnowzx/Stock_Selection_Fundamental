@@ -2,26 +2,28 @@
 
 港股 / A 股基本面量化研究框架（配置驱动、模块化、可扩展）。
 
-当前仓库包含两套代码：
+当前仓库包含两套实现：
 
-- `stock_selection_fundamental/`：重构后的主框架（推荐使用）
-- `hk_stock_quant/`：历史兼容实现（保留可运行能力）
+- `stock_selection_fundamental/`: 重构后的主框架（推荐）
+- `hk_stock_quant/`: 历史兼容实现（保留可运行能力）
 
-## 1. 核心能力
+## Core Features
 
-- 统一 `DataProvider` 接口（本地 CSV + AkShare HK/CN）
-- 可见性控制（`release_date <= signal_date`）
+- 统一 `DataProvider` 接口
+- 财报可见性控制（`release_date <= signal_date`）
 - 数据标准化映射（字段、市场、行业）
 - 6 因子评分、月度调仓、交易成本与滑点
-- 组合约束：单票上限、持仓上下限、流动性约束、lot size、最小成交额
-- 风险能力：行业中性（可选）、风格软约束（占位可跑）
-- 归因：Brinson-lite（日频 market/industry/selection）
-- 研究：IC / Rank IC / 分层收益 / 稳定性
-- 报告：CSV + HTML
-- 基线回归：`baseline_metrics.json` 冻结与对比
+- 组合约束：单票上限、持仓上下限、流动性、lot size、最小成交额
+- 风险能力：可选行业中性、风格软约束（占位可跑）
+- 日频 Brinson-lite 归因（market / industry / selection）
+- 研究输出：IC / Rank IC / 分层收益 / 稳定性
+- 回测报告：CSV + HTML
+- 基线冻结与回归对比（`baseline_metrics.json`）
 - 实验平台：参数网格、walk-forward、regime 测试
+- 运行审计：`run_id`、`config_hash`、`data_hash`
+- AkShare 增量同步与断点检查点（`sync_checkpoint.json`）
 
-## 2. 目录结构
+## Project Structure
 
 ```text
 stock_selection_fundamental/
@@ -34,21 +36,21 @@ scripts/
 tests/
 ```
 
-## 3. 安装
+## Install
 
 ```bash
 python -m pip install -e .
 ```
 
-## 4. 快速开始
+## Quick Start
 
-### 4.1 生成 demo 数据
+### 1) Generate demo data
 
 ```bash
 python -m stock_selection_fundamental.cli generate-demo-data --output-dir sample_data
 ```
 
-### 4.2 准备 curated 快照（推荐先做）
+### 2) Prepare curated snapshot (recommended)
 
 ```bash
 python -m stock_selection_fundamental.cli prepare-curated \
@@ -57,7 +59,7 @@ python -m stock_selection_fundamental.cli prepare-curated \
   --output-dir data/curated/hk_phase1
 ```
 
-### 4.3 运行回测（配置驱动）
+### 3) Run backtest
 
 ```bash
 python -m stock_selection_fundamental.cli run-backtest \
@@ -67,7 +69,7 @@ python -m stock_selection_fundamental.cli run-backtest \
   --run-id baseline_hk
 ```
 
-### 4.4 冻结并校验基线
+### 4) Freeze and check baseline
 
 ```bash
 python -m stock_selection_fundamental.cli freeze-baseline \
@@ -80,51 +82,51 @@ python -m stock_selection_fundamental.cli check-baseline \
   --tolerance-bps 50
 ```
 
-### 4.5 运行实验
+### 5) Run experiment suite
 
 ```bash
 python -m stock_selection_fundamental.cli run-experiment \
   --config configs/experiments/smoke.yaml
 ```
 
-## 5. CLI 命令
+## CLI Commands
 
 - `generate-demo-data`
-- `sync-akshare-hk`
-- `sync-akshare-cn`
+- `sync-akshare-hk` (supports incremental sync; use `--full-sync` to disable)
+- `sync-akshare-cn` (supports incremental sync; use `--full-sync` to disable)
 - `prepare-curated`
 - `run-backtest`
 - `run-experiment`
 - `freeze-baseline`
 - `check-baseline`
 
-## 6. 配置文件
+## Config Files
 
-- `configs/markets/*.yaml`：市场与 universe 规则
-- `configs/strategies/*.yaml`：因子、标准化、选股、权重方法
-- `configs/backtests/*.yaml`：回测区间、成本、输出、存储
-- `configs/risk/*.yaml`：行业中性/流动性/风格约束
-- `configs/experiments/*.yaml`：参数网格、walk-forward、regime
+- `configs/markets/*.yaml`: market and universe rules
+- `configs/strategies/*.yaml`: factors, transforms, selection, weighting
+- `configs/backtests/*.yaml`: dates, costs, outputs, storage
+- `configs/risk/*.yaml`: industry neutrality, liquidity, style limits
+- `configs/experiments/*.yaml`: grid, walk-forward, regimes
 
-## 7. 输出说明
+## Output Files
 
-`run-backtest` 输出目录（`output_dir/run_id/`）包含：
+`run-backtest` writes to `output_dir/run_id/`:
 
 - `nav_history.csv`, `trades.csv`, `holdings_history.csv`, `selection_history.csv`
 - `metrics.json`, `config_snapshot.json`, `run_metadata.json`
 - `ic_summary.csv`, `ic_timeseries.csv`, `rolling_ic.csv`
 - `quantile_returns.csv`, `factor_coverage.csv`, `factor_moments.csv`, `factor_correlation.csv`
-- `constraint_stats.csv`, `attribution_daily.csv`
+- `constraint_stats.csv`, `attribution_daily.csv`, `corporate_action_ledger.csv`
 - `nav_vs_benchmark.png`, `drawdown.png`, `report.html`
 
-可选 parquet：在 backtest 配置中设置 `storage.write_parquet: true`。
+Optional parquet output: set `storage.write_parquet: true` in backtest config.
 
-## 8. 测试
+## Testing
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-## 9. 兼容性
+## Compatibility
 
-历史命令 `python -m hk_stock_quant.cli ...` 仍可使用；新开发建议统一迁移到 `stock_selection_fundamental`。
+Legacy command `python -m hk_stock_quant.cli ...` remains available. New development should use `stock_selection_fundamental`.
