@@ -3,3 +3,8 @@ base_backtest_config: configs/backtests/hk_top20.yaml
 output_root: outputs/experiments
 grid:
   selection.top_n: [20]
+walk_forward:
+  windows:
+    - {name: wf_window, start: 2025-01-02, end: 2025-12-31}
+regimes:
+  - {name: regime_smoke, start: 2024-01-02, end: 2024-12-31}
