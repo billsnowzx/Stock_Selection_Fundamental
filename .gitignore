@@ -4,5 +4,5 @@
 outputs/
 outputs_real*/
 sample_data/
-real_data_hk*/
+real_data_*/
 .venv/

@@ -1,23 +1,23 @@
-﻿# 港股基本面量化选股与回测框架
+﻿# 港股 / A股 基本面量化选股与回测框架
 
-这是一个从零开始的港股基本面量化研究框架，目标是把你给出的 6 个条件落成可执行的选股、回测和研究输出流程。
-当前版本支持两条数据路径：
+这是一个从零开始的基本面量化研究框架，目标是把 6 个条件落成可执行的选股、回测和研究输出流程。
+当前版本支持三条数据路径：
 
 - 演示路径：本地 CSV / 合成样例数据
-- 真实路径：AkShare 同步港股主板数据到本地 CSV，再复用同一套回测引擎
+- 港股真实路径：AkShare 同步港股数据到本地 CSV
+- A 股真实路径：AkShare 同步 A 股数据到本地 CSV
 
 ## 覆盖内容
 
 - 可替换数据接口 `DataProvider`
 - 默认本地 CSV 数据适配器 `LocalCSVDataProvider`
-- `AkshareHKDataProvider` 真实港股数据同步器
+- `AkshareHKDataProvider` 港股同步器
+- `AkshareCNDataProvider` A 股同步器
 - 6 个基本面因子计算与加权评分
-- 港股主板普通股股票池过滤
 - 月度调仓、下一交易日开盘成交的回测引擎
 - 交易成本、滑点、停牌处理
 - 因子 IC / Rank IC、分层收益、命中率统计
 - 报表导出与净值图绘制
-- 可重复生成的演示数据
 
 ## 目录结构
 
@@ -127,37 +127,66 @@ python -m hk_stock_quant.cli generate-demo-data --output-dir sample_data
 运行回测：
 
 ```bash
-python -m hk_stock_quant.cli run-backtest --data-dir sample_data --output-dir outputs
+python -m hk_stock_quant.cli run-backtest --data-dir sample_data --output-dir outputs --benchmark-symbol ^HSI
 ```
 
 ## 接入真实港股数据
 
-同步指定股票到本地数据集：
+同步指定股票：
 
 ```bash
 python -m hk_stock_quant.cli sync-akshare-hk --output-dir real_data_hk_sample --symbols 00700,00941,00005,00388,01024 --start 2022-01-01 --end 2025-12-31
 ```
 
-同步主板前 50 只股票：
+同步主板前 100 只：
 
 ```bash
-python -m hk_stock_quant.cli sync-akshare-hk --output-dir real_data_hk --max-symbols 50 --start 2022-01-01 --end 2025-12-31
+python -m hk_stock_quant.cli sync-akshare-hk --output-dir real_data_hk --max-symbols 100 --start 2022-01-01 --end 2025-12-31
 ```
 
-然后复用同一条回测命令：
+运行港股回测：
 
 ```bash
-python -m hk_stock_quant.cli run-backtest --data-dir real_data_hk_sample --output-dir outputs_real --top-n 3 --start 2023-01-03 --end 2025-12-31
+python -m hk_stock_quant.cli run-backtest --data-dir real_data_hk --output-dir outputs_real_hk --benchmark-symbol ^HSI
+```
+
+## 接入真实 A 股数据
+
+同步指定股票（支持 `600519`, `000001.SZ`, `sz300750` 等写法）：
+
+```bash
+python -m hk_stock_quant.cli sync-akshare-cn --output-dir real_data_cn_sample --symbols 600519,000001,300750,600036,601318 --start 2022-01-01 --end 2025-12-31
+```
+
+同步 A 股样本前 200 只：
+
+```bash
+python -m hk_stock_quant.cli sync-akshare-cn --output-dir real_data_cn --max-symbols 200 --start 2022-01-01 --end 2025-12-31
+```
+
+运行 A 股回测（沪深 300 基准）：
+
+```bash
+python -m hk_stock_quant.cli run-backtest --data-dir real_data_cn --output-dir outputs_real_cn --benchmark-symbol ^000300
 ```
 
 ## AkShare 口径说明
 
-- 港股日线来自 `stock_hk_hist`
-- 主板股票池来自 `stock_hk_main_board_spot_em`
-- 基准默认使用恒指 `HSI`，历史来自 `stock_hk_index_daily_sina`
-- 财务指标来自 `stock_financial_hk_analysis_indicator_em`
-- 资产负债表与现金流量表明细来自 `stock_financial_hk_report_em`
-- 若免费源没有精确财报发布日期，当前实现按报告类型回退为保守滞后：年报 90 天，中报 60 天，其他报告 45 天
+港股：
+
+- 日线：`stock_hk_hist`
+- 股票池：`stock_hk_main_board_spot_em`
+- 基准：`stock_hk_index_daily_sina`
+- 财务主数据：`stock_financial_hk_analysis_indicator_em`
+- 报表明细：`stock_financial_hk_report_em`
+
+A 股：
+
+- 日线：`stock_zh_a_hist`
+- 股票池：`stock_zh_a_spot_em`
+- 基准：`stock_zh_index_daily`
+- 财务主数据：`stock_financial_analysis_indicator_em`
+- 报表明细：`stock_financial_report_sina`
 
 ## 输出文件
 
@@ -184,6 +213,6 @@ python -m unittest discover -s tests -v
 ## 当前边界
 
 - 初版只做多头，不做行业中性和风险模型约束
-- 默认按日线近似港股交易日历，不含真实节假日撮合细节
-- 未处理港股最小买卖单位和公司行为复权
-- AkShare 全市场主板同步较慢，建议先按 `--symbols` 或 `--max-symbols` 小范围同步后再扩容
+- 默认按日线近似交易日历，不含真实节假日撮合细节
+- 未处理最小买卖单位和公司行为复权
+- AkShare 全市场同步较慢，建议先按 `--symbols` 或较小 `--max-symbols` 逐步扩容
