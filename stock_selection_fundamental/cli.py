@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 from pathlib import Path
+import time
 
 from hk_stock_quant.demo_data import write_demo_dataset
 
@@ -18,7 +19,7 @@ from .providers import (
 from .reporting import export_csv_outputs, export_html_report
 from .research.experiments import run_experiment_suite
 from .research.regression import compare_baseline_metrics, freeze_baseline_metrics
-from .runtime import generate_run_id, hash_config_bundle, hash_data_dir
+from .runtime import append_run_audit, generate_run_id, hash_config_bundle, hash_data_dir, utc_now_iso
 
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     experiment = subparsers.add_parser("run-experiment", help="Run experiment suite with parameter grid.")
     experiment.add_argument("--config", default="configs/experiments/fundamental_grid.yaml")
+    experiment.add_argument("--resume", dest="resume", action="store_true")
+    experiment.add_argument("--no-resume", dest="resume", action="store_false")
+    experiment.set_defaults(resume=None)
+    experiment.add_argument("--fail-fast", dest="fail_fast", action="store_true")
+    experiment.add_argument("--no-fail-fast", dest="fail_fast", action="store_false")
+    experiment.set_defaults(fail_fast=None)
 
     freeze = subparsers.add_parser("freeze-baseline", help="Freeze baseline metrics for regression checks.")
     freeze.add_argument("--metrics-file", default="outputs/hk_top20/metrics.json")
@@ -104,24 +111,58 @@ def _run_backtest(config_path: str, data_dir_override: str, output_dir_override:
     if output_dir_override:
         bundle.backtest["output_dir"] = output_dir_override
 
+    base_output_dir = Path(bundle.backtest.get("output_dir", "outputs"))
     provider_name = str(bundle.backtest.get("provider", "local_csv")).lower()
     data_dir = Path(bundle.backtest.get("data_dir", "sample_data"))
     provider = _make_provider(provider_name, data_dir)
-
     run_id = run_id_override or generate_run_id(prefix="bt")
-    logger.info("Running backtest with config=%s run_id=%s", Path(config_path).resolve(), run_id)
-    engine = BacktestEngine(config_bundle=bundle)
-    artifacts = engine.run(provider)
-
-    base_output_dir = Path(bundle.backtest.get("output_dir", "outputs"))
     output_dir = base_output_dir / run_id
+    started_at = utc_now_iso()
+    t0 = time.perf_counter()
+    config_hash = hash_config_bundle(bundle)
+    data_hash = hash_data_dir(data_dir)
+    status = "success"
+    error = ""
+
+    logger.info("Running backtest with config=%s run_id=%s", Path(config_path).resolve(), run_id)
+    try:
+        engine = BacktestEngine(config_bundle=bundle)
+        artifacts = engine.run(provider)
+    except Exception as exc:
+        status = "failed"
+        error = str(exc)
+        raise
+    finally:
+        append_run_audit(
+            base_output_dir,
+            {
+                "kind": "backtest",
+                "run_id": run_id,
+                "status": status,
+                "error": error,
+                "provider": provider_name,
+                "config_path": str(Path(config_path).resolve()),
+                "data_dir": str(data_dir.resolve()),
+                "output_dir": str(output_dir.resolve()),
+                "config_hash": config_hash,
+                "data_hash": data_hash,
+                "data_version": data_hash,
+                "started_at": started_at,
+                "ended_at": utc_now_iso(),
+                "duration_sec": time.perf_counter() - t0,
+            },
+        )
+
     run_metadata = {
         "run_id": run_id,
         "provider": provider_name,
         "data_dir": str(data_dir.resolve()),
         "output_dir": str(output_dir.resolve()),
-        "data_hash": hash_data_dir(data_dir),
-        "config_hash": hash_config_bundle(bundle),
+        "data_hash": data_hash,
+        "config_hash": config_hash,
+        "data_version": data_hash,
+        "started_at": started_at,
+        "ended_at": utc_now_iso(),
     }
 
     write_parquet = bool(bundle.backtest.get("storage", {}).get("write_parquet", False))
@@ -156,8 +197,8 @@ def _prepare_curated(config_path: str, data_dir_override: str, output_dir_overri
     print(json.dumps(result.manifest, indent=2, ensure_ascii=False, default=str))
 
 
-def _run_experiment(config_path: str) -> None:
-    result = run_experiment_suite(config_path)
+def _run_experiment(config_path: str, resume: bool | None, fail_fast: bool | None) -> None:
+    result = run_experiment_suite(config_path, resume=resume, fail_fast=fail_fast)
     print(f"Experiment ID: {result.experiment_id}")
     print(f"Output Dir: {result.output_dir.resolve()}")
     print(result.summary.head(20).to_string(index=False))
@@ -232,7 +273,7 @@ def main() -> None:
         return
 
     if args.command == "run-experiment":
-        _run_experiment(args.config)
+        _run_experiment(args.config, args.resume, args.fail_fast)
         return
 
     if args.command == "freeze-baseline":

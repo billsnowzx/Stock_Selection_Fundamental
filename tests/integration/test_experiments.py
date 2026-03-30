@@ -52,18 +52,55 @@ class ExperimentIntegrationTests(unittest.TestCase):
             self.assertIn("rank_final", result.summary.columns)
             self.assertIn("walk_forward_test_sharpe_mean", result.summary.columns)
             self.assertIn("regime_sharpe_mean", result.summary.columns)
+            self.assertIn("full_period_source", result.summary.columns)
 
             exp_dir = result.output_dir
             self.assertTrue((exp_dir / "experiment_summary.csv").exists())
             self.assertTrue((exp_dir / "experiment_ranking.csv").exists())
             self.assertTrue((exp_dir / "walk_forward_summary.csv").exists())
             self.assertTrue((exp_dir / "regime_summary.csv").exists())
+            self.assertTrue((exp_dir / "experiment_runs.jsonl").exists())
 
             scenario_dir = exp_dir / "scenarios" / "demo_scenario"
             self.assertTrue((scenario_dir / "full_period" / "metrics.json").exists())
             self.assertTrue((scenario_dir / "full_period" / "report.html").exists())
             self.assertTrue((scenario_dir / "walk_forward_summary.csv").exists())
             self.assertTrue((scenario_dir / "regime_summary.csv").exists())
+
+    def test_experiment_resume_uses_cached_periods(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            data_dir = root / "data"
+            out_dir = root / "exp_outputs"
+            write_demo_dataset(data_dir, start="2021-01-01", end="2025-12-31", n_symbols=12, seed=29)
+
+            exp_cfg = {
+                "experiment_id": "exp_resume_test",
+                "base_backtest_config": "configs/backtests/hk_top20.yaml",
+                "output_root": str(out_dir),
+                "scenarios": [
+                    {
+                        "name": "resume_scenario",
+                        "backtest.data_dir": str(data_dir),
+                        "selection.top_n": 8,
+                    }
+                ],
+                "walk_forward": {
+                    "windows": [
+                        {"name": "wf_cached", "start": "2025-01-02", "end": "2025-12-31"},
+                    ]
+                },
+                "regimes": [
+                    {"name": "regime_cached", "start": "2024-01-02", "end": "2024-12-31"},
+                ],
+            }
+            cfg_path = root / "experiment_resume.yaml"
+            cfg_path.write_text(yaml.safe_dump(exp_cfg, sort_keys=False), encoding="utf-8")
+
+            first = run_experiment_suite(cfg_path, resume=True)
+            self.assertEqual(first.summary["full_period_source"].iloc[0], "executed")
+            second = run_experiment_suite(cfg_path, resume=True)
+            self.assertEqual(second.summary["full_period_source"].iloc[0], "cached")
 
 
 if __name__ == "__main__":

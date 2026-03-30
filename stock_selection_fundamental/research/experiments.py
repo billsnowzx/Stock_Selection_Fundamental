@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from itertools import product
 from pathlib import Path
+from typing import Any
 import json
 import re
-from copy import deepcopy
+import time
 
 import pandas as pd
 
@@ -14,7 +16,13 @@ from ..config import ConfigBundle, deep_merge, load_config_bundle, load_yaml
 from ..providers.local_csv import LocalCSVDataProvider
 from ..reporting.export_csv import export_csv_outputs
 from ..reporting.export_html import export_html_report
-from ..runtime import generate_run_id, hash_config_bundle, hash_data_dir
+from ..runtime import (
+    append_run_audit,
+    generate_run_id,
+    hash_config_bundle,
+    hash_data_dir,
+    utc_now_iso,
+)
 
 
 @dataclass(slots=True)
@@ -24,15 +32,34 @@ class ExperimentRunResult:
     summary: pd.DataFrame
 
 
-def run_experiment_suite(config_path: str | Path) -> ExperimentRunResult:
+@dataclass(slots=True)
+class PeriodRunResult:
+    metrics: dict[str, float]
+    source: str
+    status: str
+    error: str
+    duration_sec: float
+    config_hash: str
+    data_hash: str
+    run_state_path: Path
+
+
+def run_experiment_suite(
+    config_path: str | Path,
+    resume: bool | None = None,
+    fail_fast: bool | None = None,
+) -> ExperimentRunResult:
     cfg_path = Path(config_path).resolve()
     cfg = load_yaml(cfg_path)
     base_backtest_cfg = cfg.get("base_backtest_config", "configs/backtests/hk_top20.yaml")
     base_bundle = load_config_bundle(base_backtest_cfg)
 
+    resume_run = bool(cfg.get("resume", True)) if resume is None else bool(resume)
+    fail_fast_run = bool(cfg.get("fail_fast", False)) if fail_fast is None else bool(fail_fast)
     output_root = Path(cfg.get("output_root", "outputs/experiments"))
     output_root.mkdir(parents=True, exist_ok=True)
     experiment_id = str(cfg.get("experiment_id") or generate_run_id(prefix="exp"))
+    run_instance_id = generate_run_id(prefix="exp_run")
     exp_dir = output_root / experiment_id
     exp_dir.mkdir(parents=True, exist_ok=True)
     scenarios_dir = exp_dir / "scenarios"
@@ -48,42 +75,79 @@ def run_experiment_suite(config_path: str | Path) -> ExperimentRunResult:
         scenario_dir = scenarios_dir / _safe_name(scenario_name)
         scenario_dir.mkdir(parents=True, exist_ok=True)
         bundle = _apply_scenario_overrides(base_bundle, scenario)
-        metrics = _run_period(
-            bundle=bundle,
-            period_name="full_period",
-            output_dir=scenario_dir / "full_period",
-            experiment_id=experiment_id,
-            scenario_name=scenario_name,
-            export_artifacts=True,
-        )
 
-        walk_df = _run_walk_forward(
-            scenario_dir=scenario_dir,
-            base_bundle=bundle,
-            scenario_name=scenario_name,
-            cfg=cfg,
-            experiment_id=experiment_id,
+        scenario_started = time.perf_counter()
+        scenario_status = "success"
+        scenario_error = ""
+        full_period = PeriodRunResult(
+            metrics={},
+            source="none",
+            status="failed",
+            error="",
+            duration_sec=0.0,
+            config_hash=hash_config_bundle(bundle),
+            data_hash=hash_data_dir(bundle.backtest.get("data_dir", "sample_data")),
+            run_state_path=scenario_dir / "full_period" / "run_state.json",
         )
+        walk_df = pd.DataFrame()
+        regime_df = pd.DataFrame()
+
+        try:
+            full_period = _run_period(
+                bundle=bundle,
+                period_name="full_period",
+                output_dir=scenario_dir / "full_period",
+                experiment_id=experiment_id,
+                scenario_name=scenario_name,
+                run_instance_id=run_instance_id,
+                export_artifacts=True,
+                resume=resume_run,
+            )
+            walk_df = _run_walk_forward(
+                scenario_dir=scenario_dir,
+                base_bundle=bundle,
+                scenario_name=scenario_name,
+                cfg=cfg,
+                experiment_id=experiment_id,
+                run_instance_id=run_instance_id,
+                resume=resume_run,
+                fail_fast=fail_fast_run,
+            )
+            regime_df = _run_regimes(
+                scenario_dir=scenario_dir,
+                base_bundle=bundle,
+                scenario_name=scenario_name,
+                cfg=cfg,
+                experiment_id=experiment_id,
+                run_instance_id=run_instance_id,
+                resume=resume_run,
+                fail_fast=fail_fast_run,
+            )
+        except Exception as exc:
+            scenario_status = "failed"
+            scenario_error = str(exc)
+            if fail_fast_run:
+                raise
+
         if not walk_df.empty:
             walk_rows.append(walk_df)
-
-        regime_df = _run_regimes(
-            scenario_dir=scenario_dir,
-            base_bundle=bundle,
-            scenario_name=scenario_name,
-            cfg=cfg,
-            experiment_id=experiment_id,
-        )
         if not regime_df.empty:
             regime_rows.append(regime_df)
 
         row = {
             "scenario_name": scenario_name,
-            "total_return": metrics.get("total_return", 0.0),
-            "annualized_return": metrics.get("annualized_return", 0.0),
-            "sharpe": metrics.get("sharpe", 0.0),
-            "max_drawdown": metrics.get("max_drawdown", 0.0),
-            "turnover": metrics.get("turnover", 0.0),
+            "scenario_status": scenario_status,
+            "scenario_error": scenario_error,
+            "total_return": full_period.metrics.get("total_return", 0.0),
+            "annualized_return": full_period.metrics.get("annualized_return", 0.0),
+            "sharpe": full_period.metrics.get("sharpe", 0.0),
+            "max_drawdown": full_period.metrics.get("max_drawdown", 0.0),
+            "turnover": full_period.metrics.get("turnover", 0.0),
+            "full_period_source": full_period.source,
+            "full_period_status": full_period.status,
+            "full_period_duration_sec": full_period.duration_sec,
+            "config_hash": full_period.config_hash,
+            "data_hash": full_period.data_hash,
             "overrides": json.dumps(scenario, ensure_ascii=False, default=str),
         }
         row.update(_summarize_walk_forward(walk_df))
@@ -99,6 +163,23 @@ def run_experiment_suite(config_path: str | Path) -> ExperimentRunResult:
             encoding="utf-8",
         )
 
+        append_run_audit(
+            exp_dir,
+            {
+                "kind": "experiment_scenario",
+                "experiment_id": experiment_id,
+                "run_instance_id": run_instance_id,
+                "scenario_name": scenario_name,
+                "status": scenario_status,
+                "error": scenario_error,
+                "duration_sec": time.perf_counter() - scenario_started,
+                "full_period_source": full_period.source,
+                "config_hash": full_period.config_hash,
+                "data_hash": full_period.data_hash,
+            },
+            filename="experiment_runs.jsonl",
+        )
+
     summary = pd.DataFrame(scenario_rows)
     if not summary.empty:
         summary = _add_ranking(summary)
@@ -111,9 +192,28 @@ def run_experiment_suite(config_path: str | Path) -> ExperimentRunResult:
     if regime_rows:
         pd.concat(regime_rows, ignore_index=True).to_csv(exp_dir / "regime_summary.csv", index=False)
 
+    config_snapshot = dict(cfg)
+    config_snapshot["resolved"] = {
+        "resume": resume_run,
+        "fail_fast": fail_fast_run,
+        "run_instance_id": run_instance_id,
+    }
     (exp_dir / "experiment_config_snapshot.json").write_text(
-        json.dumps(cfg, ensure_ascii=False, indent=2, default=str),
+        json.dumps(config_snapshot, ensure_ascii=False, indent=2, default=str),
         encoding="utf-8",
+    )
+    append_run_audit(
+        output_root,
+        {
+            "kind": "experiment_suite",
+            "experiment_id": experiment_id,
+            "run_instance_id": run_instance_id,
+            "scenario_count": int(len(scenario_rows)),
+            "resume": resume_run,
+            "fail_fast": fail_fast_run,
+            "output_dir": str(exp_dir.resolve()),
+        },
+        filename="run_audit.jsonl",
     )
     return ExperimentRunResult(experiment_id=experiment_id, output_dir=exp_dir, summary=summary)
 
@@ -122,8 +222,11 @@ def _run_walk_forward(
     scenario_dir: Path,
     base_bundle: ConfigBundle,
     scenario_name: str,
-    cfg: dict,
+    cfg: dict[str, Any],
     experiment_id: str,
+    run_instance_id: str,
+    resume: bool,
+    fail_fast: bool,
 ) -> pd.DataFrame:
     walk_cfg = cfg.get("walk_forward", {}) or {}
     folds = walk_cfg.get("folds", []) or []
@@ -136,62 +239,97 @@ def _run_walk_forward(
 
     for idx, fold in enumerate(folds, start=1):
         fold_name = str(fold.get("name") or f"fold_{idx:02d}")
-        train_metrics = _run_period(
-            bundle=_period_bundle(base_bundle, fold["train_start"], fold["train_end"]),
-            period_name=f"{fold_name}_train",
-            output_dir=walk_dir / _safe_name(f"{fold_name}_train"),
-            experiment_id=experiment_id,
-            scenario_name=scenario_name,
-            export_artifacts=save_artifacts,
-        )
-        test_metrics = _run_period(
-            bundle=_period_bundle(base_bundle, fold["test_start"], fold["test_end"]),
-            period_name=f"{fold_name}_test",
-            output_dir=walk_dir / _safe_name(f"{fold_name}_test"),
-            experiment_id=experiment_id,
-            scenario_name=scenario_name,
-            export_artifacts=save_artifacts,
-        )
+        try:
+            train_res = _run_period(
+                bundle=_period_bundle(base_bundle, fold["train_start"], fold["train_end"]),
+                period_name=f"{fold_name}_train",
+                output_dir=walk_dir / _safe_name(f"{fold_name}_train"),
+                experiment_id=experiment_id,
+                scenario_name=scenario_name,
+                run_instance_id=run_instance_id,
+                export_artifacts=save_artifacts,
+                resume=resume,
+            )
+            test_res = _run_period(
+                bundle=_period_bundle(base_bundle, fold["test_start"], fold["test_end"]),
+                period_name=f"{fold_name}_test",
+                output_dir=walk_dir / _safe_name(f"{fold_name}_test"),
+                experiment_id=experiment_id,
+                scenario_name=scenario_name,
+                run_instance_id=run_instance_id,
+                export_artifacts=save_artifacts,
+                resume=resume,
+            )
+            row_status = "success"
+            row_error = ""
+        except Exception as exc:
+            if fail_fast:
+                raise
+            train_res = PeriodRunResult({}, "none", "failed", str(exc), 0.0, "", "", walk_dir / "run_state.json")
+            test_res = PeriodRunResult({}, "none", "failed", str(exc), 0.0, "", "", walk_dir / "run_state.json")
+            row_status = "failed"
+            row_error = str(exc)
+
         rows.append(
             {
                 "scenario_name": scenario_name,
                 "mode": "fold",
                 "segment_name": fold_name,
+                "segment_status": row_status,
+                "segment_error": row_error,
                 "train_start": fold["train_start"],
                 "train_end": fold["train_end"],
                 "test_start": fold["test_start"],
                 "test_end": fold["test_end"],
-                "train_sharpe": train_metrics.get("sharpe", 0.0),
-                "test_sharpe": test_metrics.get("sharpe", 0.0),
-                "train_total_return": train_metrics.get("total_return", 0.0),
-                "test_total_return": test_metrics.get("total_return", 0.0),
-                "sharpe_gap_test_minus_train": test_metrics.get("sharpe", 0.0) - train_metrics.get("sharpe", 0.0),
+                "train_source": train_res.source,
+                "test_source": test_res.source,
+                "train_sharpe": train_res.metrics.get("sharpe", 0.0),
+                "test_sharpe": test_res.metrics.get("sharpe", 0.0),
+                "train_total_return": train_res.metrics.get("total_return", 0.0),
+                "test_total_return": test_res.metrics.get("total_return", 0.0),
+                "sharpe_gap_test_minus_train": test_res.metrics.get("sharpe", 0.0) - train_res.metrics.get("sharpe", 0.0),
             }
         )
 
     for idx, window in enumerate(windows, start=1):
         seg_name = str(window.get("name") or f"window_{idx:02d}")
-        metrics = _run_period(
-            bundle=_period_bundle(base_bundle, window["start"], window["end"]),
-            period_name=f"{seg_name}_oos",
-            output_dir=walk_dir / _safe_name(f"{seg_name}_oos"),
-            experiment_id=experiment_id,
-            scenario_name=scenario_name,
-            export_artifacts=save_artifacts,
-        )
+        try:
+            test_res = _run_period(
+                bundle=_period_bundle(base_bundle, window["start"], window["end"]),
+                period_name=f"{seg_name}_oos",
+                output_dir=walk_dir / _safe_name(f"{seg_name}_oos"),
+                experiment_id=experiment_id,
+                scenario_name=scenario_name,
+                run_instance_id=run_instance_id,
+                export_artifacts=save_artifacts,
+                resume=resume,
+            )
+            row_status = "success"
+            row_error = ""
+        except Exception as exc:
+            if fail_fast:
+                raise
+            test_res = PeriodRunResult({}, "none", "failed", str(exc), 0.0, "", "", walk_dir / "run_state.json")
+            row_status = "failed"
+            row_error = str(exc)
+
         rows.append(
             {
                 "scenario_name": scenario_name,
                 "mode": "window",
                 "segment_name": seg_name,
+                "segment_status": row_status,
+                "segment_error": row_error,
                 "train_start": None,
                 "train_end": None,
                 "test_start": window["start"],
                 "test_end": window["end"],
+                "train_source": "n/a",
+                "test_source": test_res.source,
                 "train_sharpe": None,
-                "test_sharpe": metrics.get("sharpe", 0.0),
+                "test_sharpe": test_res.metrics.get("sharpe", 0.0),
                 "train_total_return": None,
-                "test_total_return": metrics.get("total_return", 0.0),
+                "test_total_return": test_res.metrics.get("total_return", 0.0),
                 "sharpe_gap_test_minus_train": None,
             }
         )
@@ -207,8 +345,11 @@ def _run_regimes(
     scenario_dir: Path,
     base_bundle: ConfigBundle,
     scenario_name: str,
-    cfg: dict,
+    cfg: dict[str, Any],
     experiment_id: str,
+    run_instance_id: str,
+    resume: bool,
+    fail_fast: bool,
 ) -> pd.DataFrame:
     regimes = cfg.get("regimes", []) or []
     if not regimes:
@@ -222,24 +363,39 @@ def _run_regimes(
     rows: list[dict[str, object]] = []
     for idx, regime in enumerate(regimes, start=1):
         regime_name = str(regime.get("name") or f"regime_{idx:02d}")
-        metrics = _run_period(
-            bundle=_period_bundle(base_bundle, regime["start"], regime["end"]),
-            period_name=regime_name,
-            output_dir=regime_dir / _safe_name(regime_name),
-            experiment_id=experiment_id,
-            scenario_name=scenario_name,
-            export_artifacts=save_artifacts,
-        )
+        try:
+            period = _run_period(
+                bundle=_period_bundle(base_bundle, regime["start"], regime["end"]),
+                period_name=regime_name,
+                output_dir=regime_dir / _safe_name(regime_name),
+                experiment_id=experiment_id,
+                scenario_name=scenario_name,
+                run_instance_id=run_instance_id,
+                export_artifacts=save_artifacts,
+                resume=resume,
+            )
+            row_status = "success"
+            row_error = ""
+        except Exception as exc:
+            if fail_fast:
+                raise
+            period = PeriodRunResult({}, "none", "failed", str(exc), 0.0, "", "", regime_dir / "run_state.json")
+            row_status = "failed"
+            row_error = str(exc)
+
         rows.append(
             {
                 "scenario_name": scenario_name,
                 "regime_name": regime_name,
+                "regime_status": row_status,
+                "regime_error": row_error,
+                "source": period.source,
                 "start": regime["start"],
                 "end": regime["end"],
-                "total_return": metrics.get("total_return", 0.0),
-                "annualized_return": metrics.get("annualized_return", 0.0),
-                "sharpe": metrics.get("sharpe", 0.0),
-                "max_drawdown": metrics.get("max_drawdown", 0.0),
+                "total_return": period.metrics.get("total_return", 0.0),
+                "annualized_return": period.metrics.get("annualized_return", 0.0),
+                "sharpe": period.metrics.get("sharpe", 0.0),
+                "max_drawdown": period.metrics.get("max_drawdown", 0.0),
             }
         )
     out = pd.DataFrame(rows)
@@ -253,28 +409,139 @@ def _run_period(
     output_dir: Path,
     experiment_id: str,
     scenario_name: str,
+    run_instance_id: str,
     export_artifacts: bool,
-) -> dict[str, float]:
-    provider = LocalCSVDataProvider(bundle.backtest.get("data_dir", "sample_data"))
-    artifacts = BacktestEngine(bundle).run(provider)
-    if export_artifacts:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        run_metadata = {
+    resume: bool,
+) -> PeriodRunResult:
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    started_at = utc_now_iso()
+    t0 = time.perf_counter()
+
+    data_dir = Path(bundle.backtest.get("data_dir", "sample_data"))
+    config_hash = hash_config_bundle(bundle)
+    data_hash = hash_data_dir(data_dir)
+    run_state_path = output_dir / "run_state.json"
+    metrics_path = output_dir / "metrics.json"
+
+    if resume:
+        cached = _load_cached_period(run_state_path, metrics_path, config_hash=config_hash, data_hash=data_hash)
+        if cached is not None:
+            return PeriodRunResult(
+                metrics=cached,
+                source="cached",
+                status="success",
+                error="",
+                duration_sec=0.0,
+                config_hash=config_hash,
+                data_hash=data_hash,
+                run_state_path=run_state_path,
+            )
+
+    try:
+        provider = LocalCSVDataProvider(data_dir)
+        artifacts = BacktestEngine(bundle).run(provider)
+        metrics = {k: float(v) for k, v in artifacts.metrics.items()}
+
+        if export_artifacts:
+            run_metadata = {
+                "experiment_id": experiment_id,
+                "scenario_name": scenario_name,
+                "period_name": period_name,
+                "run_instance_id": run_instance_id,
+                "config_hash": config_hash,
+                "data_hash": data_hash,
+            }
+            export_csv_outputs(
+                artifacts=artifacts,
+                output_dir=output_dir,
+                config_snapshot=bundle.as_dict(),
+                run_metadata=run_metadata,
+                write_parquet=bool(bundle.backtest.get("storage", {}).get("write_parquet", False)),
+            )
+            export_html_report(artifacts=artifacts, output_dir=output_dir, config_snapshot=bundle.as_dict())
+
+        ended_at = utc_now_iso()
+        duration_sec = time.perf_counter() - t0
+        state_payload = {
+            "status": "success",
             "experiment_id": experiment_id,
             "scenario_name": scenario_name,
             "period_name": period_name,
-            "config_hash": hash_config_bundle(bundle),
-            "data_hash": hash_data_dir(bundle.backtest.get("data_dir", "sample_data")),
+            "run_instance_id": run_instance_id,
+            "source": "executed",
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "duration_sec": duration_sec,
+            "config_hash": config_hash,
+            "data_hash": data_hash,
+            "metrics": metrics,
+            "export_artifacts": export_artifacts,
         }
-        export_csv_outputs(
-            artifacts=artifacts,
-            output_dir=output_dir,
-            config_snapshot=bundle.as_dict(),
-            run_metadata=run_metadata,
-            write_parquet=bool(bundle.backtest.get("storage", {}).get("write_parquet", False)),
+        run_state_path.write_text(json.dumps(state_payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        return PeriodRunResult(
+            metrics=metrics,
+            source="executed",
+            status="success",
+            error="",
+            duration_sec=duration_sec,
+            config_hash=config_hash,
+            data_hash=data_hash,
+            run_state_path=run_state_path,
         )
-        export_html_report(artifacts=artifacts, output_dir=output_dir, config_snapshot=bundle.as_dict())
-    return {k: float(v) for k, v in artifacts.metrics.items()}
+    except Exception as exc:
+        ended_at = utc_now_iso()
+        duration_sec = time.perf_counter() - t0
+        state_payload = {
+            "status": "failed",
+            "experiment_id": experiment_id,
+            "scenario_name": scenario_name,
+            "period_name": period_name,
+            "run_instance_id": run_instance_id,
+            "source": "executed",
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "duration_sec": duration_sec,
+            "config_hash": config_hash,
+            "data_hash": data_hash,
+            "error": str(exc),
+            "export_artifacts": export_artifacts,
+        }
+        run_state_path.write_text(json.dumps(state_payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        raise
+
+
+def _load_cached_period(
+    run_state_path: Path,
+    metrics_path: Path,
+    *,
+    config_hash: str,
+    data_hash: str,
+) -> dict[str, float] | None:
+    if not run_state_path.exists():
+        return None
+    try:
+        payload = json.loads(run_state_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if payload.get("status") != "success":
+        return None
+    if payload.get("config_hash") != config_hash or payload.get("data_hash") != data_hash:
+        return None
+    if metrics_path.exists():
+        try:
+            metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+            if isinstance(metrics, dict):
+                return {k: float(v) for k, v in metrics.items()}
+        except Exception:
+            pass
+    metrics = payload.get("metrics")
+    if isinstance(metrics, dict):
+        try:
+            return {k: float(v) for k, v in metrics.items()}
+        except Exception:
+            return None
+    return None
 
 
 def _period_bundle(base_bundle: ConfigBundle, start: str, end: str) -> ConfigBundle:
@@ -333,7 +600,10 @@ def _add_ranking(summary: pd.DataFrame) -> pd.DataFrame:
     return ranked
 
 
-def _expand_scenarios(grid: dict[str, list[object]], scenarios: list[dict[str, object]] | None = None) -> list[dict[str, object]]:
+def _expand_scenarios(
+    grid: dict[str, list[object]],
+    scenarios: list[dict[str, object]] | None = None,
+) -> list[dict[str, object]]:
     expanded: list[dict[str, object]] = []
     if grid:
         keys = sorted(grid.keys())
