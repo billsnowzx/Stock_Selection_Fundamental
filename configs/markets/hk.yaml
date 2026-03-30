@@ -1,0 +1,19 @@
+market: HK
+exchange: HKEX
+currency: HKD
+lot_size_enabled: false
+benchmark_symbol: "^HSI"
+universe:
+  board: MAIN
+  security_type: EQUITY
+  excluded_security_types:
+    - ETF
+    - REIT
+    - WARRANT
+    - CBBC
+    - DERIVATIVE
+    - PREFERENCE
+  min_listing_days: 252
+  liquidity_lookback_days: 20
+  min_avg_turnover: 2000000
+  exclude_st: false

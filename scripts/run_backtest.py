@@ -1,0 +1,38 @@
+from __future__ import annotations
+
+import argparse
+import json
+
+from stock_selection_fundamental.backtest.engine import BacktestEngine
+from stock_selection_fundamental.config import load_config_bundle
+from stock_selection_fundamental.providers.local_csv import LocalCSVDataProvider
+from stock_selection_fundamental.reporting.export_csv import export_csv_outputs
+from stock_selection_fundamental.reporting.export_html import export_html_report
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run a config-driven backtest.")
+    parser.add_argument("--config", default="configs/backtests/hk_top20.yaml")
+    parser.add_argument("--data-dir", default="")
+    parser.add_argument("--output-dir", default="")
+    args = parser.parse_args()
+
+    bundle = load_config_bundle(args.config)
+    if args.data_dir:
+        bundle.backtest["data_dir"] = args.data_dir
+    if args.output_dir:
+        bundle.backtest["output_dir"] = args.output_dir
+
+    provider = LocalCSVDataProvider(bundle.backtest.get("data_dir", "sample_data"))
+    engine = BacktestEngine(bundle)
+    artifacts = engine.run(provider)
+
+    output_path = export_csv_outputs(artifacts, bundle.backtest.get("output_dir", "outputs"), bundle.as_dict())
+    report_path = export_html_report(artifacts, output_path, bundle.as_dict())
+    print(json.dumps(artifacts.metrics, indent=2, ensure_ascii=False))
+    print(f"CSV outputs: {output_path.resolve()}")
+    print(f"HTML report: {report_path.resolve()}")
+
+
+if __name__ == "__main__":
+    main()

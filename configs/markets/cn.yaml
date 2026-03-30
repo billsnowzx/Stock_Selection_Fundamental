@@ -1,0 +1,16 @@
+market: CN
+exchange: SSE_SZSE
+currency: CNY
+lot_size_enabled: false
+benchmark_symbol: "^000300"
+universe:
+  board: MAIN
+  security_type: EQUITY
+  excluded_security_types:
+    - ETF
+    - LOF
+    - BOND
+  min_listing_days: 252
+  liquidity_lookback_days: 20
+  min_avg_turnover: 5000000
+  exclude_st: true

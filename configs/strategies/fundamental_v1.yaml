@@ -1,0 +1,25 @@
+name: fundamental_v1
+factor_weights:
+  roic: 1.0
+  net_margin: 1.0
+  debt_to_cashflow: 1.0
+  revenue_growth_yoy: 1.0
+  net_income_growth_yoy: 1.0
+  fcf_conversion: 1.0
+transform:
+  method: zscore
+  winsorize_limits: [0.05, 0.95]
+  by_industry: false
+min_factors_required: 4
+signals:
+  rebalance_frequency: M
+selection:
+  top_n: 20
+  top_percentile: null
+  min_selection: 10
+portfolio:
+  weight_method: equal_weight
+  max_single_weight: 0.10
+  min_holdings: 10
+  max_holdings: 30
+quantiles: 5

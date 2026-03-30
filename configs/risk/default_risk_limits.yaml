@@ -1,0 +1,9 @@
+industry_neutral: false
+style_neutral: false
+single_name_max_weight: 0.10
+max_turnover_per_rebalance: 1.00
+volatility_target: null
+max_drawdown_limit: null
+liquidity:
+  enabled: true
+  max_adv_participation: 0.1

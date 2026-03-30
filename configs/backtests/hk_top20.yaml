@@ -1,0 +1,17 @@
+name: hk_top20
+market_config: ../markets/hk.yaml
+strategy_config: ../strategies/fundamental_v1.yaml
+risk_config: ../risk/default_risk_limits.yaml
+provider: local_csv
+data_dir: sample_data
+output_dir: outputs/hk_top20
+start: 2023-01-03
+end: 2025-12-31
+initial_capital: 1000000
+benchmark_symbol: "^HSI"
+rebalance_frequency: M
+max_single_weight: 0.10
+costs:
+  transaction_cost_bps: 20
+  slippage_bps: 10
+  minimum_fee: 0
