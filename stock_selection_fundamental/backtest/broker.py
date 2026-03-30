@@ -47,7 +47,8 @@ def execute_rebalance(
     cost_model: CostModel,
     lot_sizes: pd.Series | None = None,
     min_trade_notional: float = 0.0,
-) -> tuple[dict[str, int], float, pd.DataFrame]:
+    return_details: bool = False,
+) -> tuple[dict[str, int], float, pd.DataFrame] | tuple[dict[str, int], float, pd.DataFrame, dict[str, object]]:
     open_prices = price_tables["open"]
     close_prices = price_tables["close"]
     suspended = price_tables["suspended"]
@@ -68,6 +69,7 @@ def execute_rebalance(
         and pd.notna(open_prices.at[date, symbol])
         and not bool(suspended.at[date, symbol])
     }
+    non_tradable_target_symbols = sorted(target_symbols - tradable_symbols)
 
     trades: list[dict[str, float | str | pd.Timestamp | int]] = []
 
@@ -181,7 +183,14 @@ def execute_rebalance(
     trade_frame = pd.DataFrame(trades)
     if not trade_frame.empty:
         trade_frame = trade_frame.sort_values(["date", "symbol", "side"]).reset_index(drop=True)
-    return holdings, float(cash), trade_frame
+    if not return_details:
+        return holdings, float(cash), trade_frame
+    details = {
+        "non_tradable_target_symbols": non_tradable_target_symbols,
+        "unfilled_target_weight": float(target_weights.reindex(non_tradable_target_symbols).fillna(0.0).sum()),
+        "executed_trade_count": int(len(trade_frame)),
+    }
+    return holdings, float(cash), trade_frame, details
 
 
 def _round_down_lot(shares: int, lot_size: int) -> int:

@@ -11,3 +11,6 @@ style_limits:
 liquidity:
   enabled: true
   max_adv_participation: 0.1
+execution:
+  retry_unfilled_days: 1
+  retry_weight_threshold: 0.03

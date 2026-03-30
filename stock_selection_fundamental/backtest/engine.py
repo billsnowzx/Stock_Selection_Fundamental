@@ -8,6 +8,7 @@ import pandas as pd
 
 from ..config import ConfigBundle
 from ..factors.registry import build_factor_panel
+from ..portfolio.constraints import enforce_turnover_cap
 from ..portfolio.construction import build_target_weights
 from ..portfolio.turnover import portfolio_turnover
 from ..providers.base import DataProvider
@@ -68,8 +69,18 @@ class BacktestEngine:
             if bool(liquidity_cfg.get("enabled", False))
             else None
         )
-        style_limits = risk_cfg.get("style_limits", {})
+        style_neutral = bool(risk_cfg.get("style_neutral", False))
+        style_limits = risk_cfg.get("style_limits", {}) if style_neutral else {}
         industry_neutral = bool(risk_cfg.get("industry_neutral", False))
+        max_turnover_per_rebalance = risk_cfg.get("max_turnover_per_rebalance")
+        max_turnover_per_rebalance = (
+            float(max_turnover_per_rebalance)
+            if max_turnover_per_rebalance is not None
+            else None
+        )
+        execution_cfg = risk_cfg.get("execution", {})
+        retry_unfilled_days = int(execution_cfg.get("retry_unfilled_days", 1))
+        retry_weight_threshold = float(execution_cfg.get("retry_weight_threshold", 0.03))
 
         price_history = provider.get_price_history(start=start, end=end)
         benchmark_history = provider.get_benchmark_history(benchmark_symbol, start=start, end=end)
@@ -87,6 +98,10 @@ class BacktestEngine:
 
         price_tables = build_price_tables(price_history)
         trading_dates = build_trading_dates(price_history, benchmark_symbol=benchmark_symbol)
+        next_trading_map = {
+            trading_dates[idx]: trading_dates[idx + 1]
+            for idx in range(len(trading_dates) - 1)
+        }
         signal_dates = generate_signal_dates(trading_dates, frequency=frequency)
         execution_map = map_signal_to_execution_dates(trading_dates, signal_dates, lag_days=1)
 
@@ -107,7 +122,7 @@ class BacktestEngine:
 
         holdings: dict[str, int] = {}
         cash = initial_capital
-        pending_targets: dict[pd.Timestamp, pd.Series] = {}
+        pending_targets: dict[pd.Timestamp, list[dict[str, Any]]] = {}
         nav_rows: list[dict[str, Any]] = []
         trade_frames: list[pd.DataFrame] = []
         holdings_rows: list[dict[str, Any]] = []
@@ -158,6 +173,7 @@ class BacktestEngine:
                     corporate_action_rows.extend(corporate_events)
 
             if date in signal_dates:
+                raw_turnover = 0.0
                 trading_status = provider.get_trading_status(master["symbol"].tolist(), date)
                 universe = build_universe(
                     master=master,
@@ -206,7 +222,7 @@ class BacktestEngine:
                         tradable_symbols = set(
                             universe.loc[universe["is_tradable"].fillna(False), "symbol"].tolist()
                         )
-                        style_exposure = estimate_style_exposure(selected)
+                        style_exposure = estimate_style_exposure(selected) if style_neutral else None
                         target_weights = build_target_weights(
                             selected=selected,
                             method=weight_method,
@@ -232,6 +248,13 @@ class BacktestEngine:
                                 benchmark_industry_weights=benchmark_weights,
                             )
 
+                        raw_turnover = portfolio_turnover(prev_target, target_weights)
+                        target_weights = enforce_turnover_cap(
+                            previous=prev_target,
+                            target=target_weights,
+                            max_turnover=max_turnover_per_rebalance,
+                        )
+
                         capacity_utilization.append(
                             _estimate_capacity_utilization(
                                 target_weights=target_weights,
@@ -240,9 +263,11 @@ class BacktestEngine:
                                 max_adv_participation=max_adv_participation,
                             )
                         )
+                post_cap_turnover = portfolio_turnover(prev_target, target_weights)
+                pre_cap_turnover = raw_turnover if raw_turnover > 0 else post_cap_turnover
 
                 scored_snapshots[date] = scored.copy()
-                turnover_series.append(portfolio_turnover(prev_target, target_weights))
+                turnover_series.append(post_cap_turnover)
                 prev_target = target_weights.copy()
 
                 for rank, (_, row) in enumerate(selected.iterrows(), start=1):
@@ -265,27 +290,84 @@ class BacktestEngine:
                         "target_count": int(len(target_weights)),
                         "max_weight_observed": float(target_weights.max()) if not target_weights.empty else 0.0,
                         "industry_neutral": industry_neutral,
+                        "style_neutral": style_neutral,
+                        "turnover_pre_cap": float(pre_cap_turnover),
+                        "turnover_post_cap": float(post_cap_turnover),
+                        "turnover_capped": bool(post_cap_turnover + 1e-12 < pre_cap_turnover),
+                        "execution_retry_scheduled": False,
+                        "retry_for_date": pd.NaT,
+                        "unfilled_target_weight": 0.0,
+                        "non_tradable_count": 0,
                     }
                 )
 
                 exec_date = execution_map.get(date)
                 if exec_date is not None:
-                    pending_targets[exec_date] = target_weights
+                    pending_targets.setdefault(exec_date, []).append(
+                        {
+                            "target_weights": target_weights,
+                            "signal_date": date,
+                            "retry_remaining": retry_unfilled_days,
+                            "is_retry": False,
+                        }
+                    )
 
             if date in pending_targets:
-                target_weights = pending_targets.pop(date)
-                holdings, cash, trades = execute_rebalance(
-                    date=date,
-                    target_weights=target_weights,
-                    holdings=holdings,
-                    cash=cash,
-                    price_tables=price_tables,
-                    cost_model=cost_model,
-                    lot_sizes=lot_size_series,
-                    min_trade_notional=min_trade_notional,
-                )
-                if not trades.empty:
-                    trade_frames.append(trades)
+                orders = pending_targets.pop(date)
+                for order in orders:
+                    target_weights = order["target_weights"]
+                    holdings, cash, trades, details = execute_rebalance(
+                        date=date,
+                        target_weights=target_weights,
+                        holdings=holdings,
+                        cash=cash,
+                        price_tables=price_tables,
+                        cost_model=cost_model,
+                        lot_sizes=lot_size_series,
+                        min_trade_notional=min_trade_notional,
+                        return_details=True,
+                    )
+                    if not trades.empty:
+                        trades = trades.assign(
+                            signal_date=order.get("signal_date"),
+                            is_retry=bool(order.get("is_retry", False)),
+                        )
+                        trade_frames.append(trades)
+
+                    unfilled_weight = float(details.get("unfilled_target_weight", 0.0))
+                    non_tradable_symbols = details.get("non_tradable_target_symbols", [])
+                    if (
+                        retry_unfilled_days > 0
+                        and order.get("retry_remaining", 0) > 0
+                        and unfilled_weight >= retry_weight_threshold
+                    ):
+                        next_date = next_trading_map.get(date)
+                        if next_date is not None:
+                            pending_targets.setdefault(next_date, []).append(
+                                {
+                                    "target_weights": target_weights,
+                                    "signal_date": order.get("signal_date"),
+                                    "retry_remaining": int(order.get("retry_remaining", 0)) - 1,
+                                    "is_retry": True,
+                                }
+                            )
+                            constraint_rows.append(
+                                {
+                                    "date": date,
+                                    "selected_count": 0,
+                                    "target_count": int(len(target_weights)),
+                                    "max_weight_observed": float(target_weights.max()) if not target_weights.empty else 0.0,
+                                    "industry_neutral": industry_neutral,
+                                    "style_neutral": style_neutral,
+                                    "turnover_pre_cap": 0.0,
+                                    "turnover_post_cap": 0.0,
+                                    "turnover_capped": False,
+                                    "execution_retry_scheduled": True,
+                                    "retry_for_date": next_date,
+                                    "unfilled_target_weight": unfilled_weight,
+                                    "non_tradable_count": len(non_tradable_symbols),
+                                }
+                            )
 
             holdings_value = portfolio_market_value(
                 holdings=holdings,

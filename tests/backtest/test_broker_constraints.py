@@ -41,6 +41,35 @@ class BrokerConstraintTests(unittest.TestCase):
         self.assertTrue((trades["notional"] >= 2000.0).all())
         self.assertGreaterEqual(cash, 0.0)
 
+    def test_rebalance_reports_unfilled_non_tradable_targets(self) -> None:
+        prices = pd.DataFrame(
+            [
+                {"date": "2024-01-31", "symbol": "AAA", "open": 10.0, "close": 10.0, "is_suspended": False},
+                {"date": "2024-01-31", "symbol": "BBB", "open": 20.0, "close": 20.0, "is_suspended": True},
+            ]
+        )
+        prices["date"] = pd.to_datetime(prices["date"])
+        prices["high"] = prices["open"]
+        prices["low"] = prices["open"]
+        prices["volume"] = 1_000_000
+        prices["turnover"] = prices["open"] * prices["volume"]
+        tables = build_price_tables(prices)
+
+        target = pd.Series({"AAA": 0.4, "BBB": 0.6})
+        holdings, cash, trades, details = execute_rebalance(
+            date=pd.Timestamp("2024-01-31"),
+            target_weights=target,
+            holdings={},
+            cash=10000.0,
+            price_tables=tables,
+            cost_model=CostModel(transaction_cost_bps=0, slippage_bps=0),
+            return_details=True,
+        )
+        self.assertIn("BBB", details["non_tradable_target_symbols"])
+        self.assertGreater(float(details["unfilled_target_weight"]), 0.0)
+        self.assertGreaterEqual(cash, 0.0)
+        self.assertIn("AAA", holdings)
+
 
 if __name__ == "__main__":
     unittest.main()

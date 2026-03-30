@@ -61,3 +61,34 @@ def enforce_style_soft_constraints(
             output.loc[breached] = output.loc[breached] * 0.8
     total = output.sum()
     return output / total if total > 0 else pd.Series(dtype=float)
+
+
+def enforce_turnover_cap(
+    previous: pd.Series,
+    target: pd.Series,
+    max_turnover: float | None,
+) -> pd.Series:
+    """Blend target towards previous allocation to satisfy turnover cap."""
+    if target.empty:
+        return target
+    if max_turnover is None:
+        return target
+    cap = float(max_turnover)
+    if cap < 0:
+        cap = 0.0
+
+    all_symbols = previous.index.union(target.index)
+    prev_aligned = previous.reindex(all_symbols).fillna(0.0)
+    tgt_aligned = target.reindex(all_symbols).fillna(0.0)
+    turnover = float((tgt_aligned - prev_aligned).abs().sum() / 2.0)
+    if turnover <= cap or turnover <= 0:
+        total = tgt_aligned.sum()
+        return tgt_aligned / total if total > 0 else pd.Series(dtype=float)
+
+    alpha = cap / turnover
+    blended = prev_aligned + alpha * (tgt_aligned - prev_aligned)
+    blended = blended.clip(lower=0.0)
+    total = blended.sum()
+    if total <= 0:
+        return pd.Series(dtype=float)
+    return blended / total
