@@ -44,6 +44,8 @@ def build_parser() -> argparse.ArgumentParser:
     sync_hk.add_argument("--benchmark-symbol", default="HSI")
     sync_hk.add_argument("--sleep-seconds", type=float, default=0.2)
     sync_hk.add_argument("--full-sync", action="store_true", help="Disable incremental sync and rebuild from start/end.")
+    sync_hk.add_argument("--retry-times", type=int, default=3)
+    sync_hk.add_argument("--fail-fast", action="store_true", help="Stop immediately when a symbol sync fails.")
 
     sync_cn = subparsers.add_parser("sync-akshare-cn", help="Sync CN market dataset with AkShare.")
     sync_cn.add_argument("--output-dir", default="data/curated/cn")
@@ -54,6 +56,8 @@ def build_parser() -> argparse.ArgumentParser:
     sync_cn.add_argument("--benchmark-symbol", default="sh000300")
     sync_cn.add_argument("--sleep-seconds", type=float, default=0.1)
     sync_cn.add_argument("--full-sync", action="store_true", help="Disable incremental sync and rebuild from start/end.")
+    sync_cn.add_argument("--retry-times", type=int, default=3)
+    sync_cn.add_argument("--fail-fast", action="store_true", help="Stop immediately when a symbol sync fails.")
 
     run = subparsers.add_parser("run-backtest", help="Run config-driven backtest.")
     run.add_argument("--config", default="configs/backtests/hk_top20.yaml")
@@ -200,6 +204,8 @@ def main() -> None:
             benchmark_symbol=args.benchmark_symbol,
             sleep_seconds=args.sleep_seconds,
             incremental=not args.full_sync,
+            retry_times=args.retry_times,
+            continue_on_error=not args.fail_fast,
         )
         print(f"AkShare HK dataset synced to {output_path.resolve()}")
         return
@@ -215,6 +221,8 @@ def main() -> None:
             benchmark_symbol=args.benchmark_symbol,
             sleep_seconds=args.sleep_seconds,
             incremental=not args.full_sync,
+            retry_times=args.retry_times,
+            continue_on_error=not args.fail_fast,
         )
         print(f"AkShare CN dataset synced to {output_path.resolve()}")
         return

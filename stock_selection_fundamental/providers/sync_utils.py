@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 import json
 
 import pandas as pd
@@ -44,6 +45,85 @@ def resolve_incremental_window(
     )
 
 
+def load_sync_checkpoint(output_dir: str | Path) -> dict[str, Any]:
+    output = Path(output_dir)
+    checkpoint = output / "sync_checkpoint.json"
+    if not checkpoint.exists():
+        return {"symbols": {}}
+    try:
+        payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return {"symbols": {}}
+        if "symbols" not in payload or not isinstance(payload["symbols"], dict):
+            payload["symbols"] = {}
+        return payload
+    except Exception:
+        return {"symbols": {}}
+
+
+def save_sync_checkpoint(output_dir: str | Path, payload: dict[str, Any]) -> None:
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    payload = dict(payload)
+    payload["updated_at"] = pd.Timestamp.utcnow().isoformat()
+    if "symbols" not in payload or not isinstance(payload["symbols"], dict):
+        payload["symbols"] = {}
+    (output / "sync_checkpoint.json").write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def update_symbol_checkpoint(
+    payload: dict[str, Any],
+    symbol: str,
+    *,
+    status: str,
+    start: str,
+    end: str,
+    attempts: int,
+    reason: str,
+    error: str = "",
+) -> dict[str, Any]:
+    symbols = payload.setdefault("symbols", {})
+    symbols[symbol] = {
+        "status": status,
+        "last_start": start,
+        "last_end": end,
+        "attempts": attempts,
+        "reason": reason,
+        "error": error,
+        "updated_at": pd.Timestamp.utcnow().isoformat(),
+    }
+    return payload
+
+
+def resolve_symbol_incremental_window(
+    symbol_state: dict[str, Any] | None,
+    requested_start: str,
+    requested_end: str,
+) -> IncrementalWindow:
+    req_start = pd.Timestamp(requested_start).normalize()
+    req_end = pd.Timestamp(requested_end).normalize()
+    if symbol_state is None:
+        return IncrementalWindow(should_sync=True, sync_start=requested_start, reason="symbol_new")
+    last_end = symbol_state.get("last_end")
+    if not last_end:
+        return IncrementalWindow(should_sync=True, sync_start=requested_start, reason="symbol_no_last_end")
+    last_end_ts = pd.Timestamp(last_end).normalize()
+    next_start = last_end_ts + pd.Timedelta(days=1)
+    if symbol_state.get("status") == "success" and next_start > req_end:
+        return IncrementalWindow(should_sync=False, sync_start=requested_end, reason="symbol_up_to_date")
+    sync_start = max(req_start, next_start)
+    if sync_start > req_end:
+        return IncrementalWindow(should_sync=False, sync_start=requested_end, reason="symbol_up_to_date")
+    return IncrementalWindow(
+        should_sync=True,
+        sync_start=sync_start.strftime("%Y-%m-%d"),
+        reason=f"symbol_resume_from_{last_end_ts.strftime('%Y-%m-%d')}",
+    )
+
+
 def merge_sync_outputs(base_dir: str | Path, new_dir: str | Path) -> None:
     base = Path(base_dir)
     new = Path(new_dir)
@@ -82,15 +162,7 @@ def update_sync_checkpoint(
     status: str,
     error: str | None = None,
 ) -> None:
-    output = Path(output_dir)
-    output.mkdir(parents=True, exist_ok=True)
-    checkpoint = output / "sync_checkpoint.json"
-    payload = {}
-    if checkpoint.exists():
-        try:
-            payload = json.loads(checkpoint.read_text(encoding="utf-8"))
-        except Exception:
-            payload = {}
+    payload = load_sync_checkpoint(output_dir)
     payload.update(
         {
             "market": market,
@@ -99,10 +171,9 @@ def update_sync_checkpoint(
             "last_reason": reason,
             "last_status": status,
             "last_error": error or "",
-            "updated_at": pd.Timestamp.utcnow().isoformat(),
         }
     )
-    checkpoint.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    save_sync_checkpoint(output_dir, payload)
 
 
 def _merge_csv(

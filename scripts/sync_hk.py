@@ -15,6 +15,8 @@ def main() -> None:
     parser.add_argument("--benchmark-symbol", default="HSI")
     parser.add_argument("--sleep-seconds", type=float, default=0.2)
     parser.add_argument("--full-sync", action="store_true")
+    parser.add_argument("--retry-times", type=int, default=3)
+    parser.add_argument("--fail-fast", action="store_true")
     args = parser.parse_args()
 
     symbol_list = args.symbols if args.symbols else None
@@ -27,6 +29,8 @@ def main() -> None:
         benchmark_symbol=args.benchmark_symbol,
         sleep_seconds=args.sleep_seconds,
         incremental=not args.full_sync,
+        retry_times=args.retry_times,
+        continue_on_error=not args.fail_fast,
     )
     print(f"HK dataset synced to {output.resolve()}")
 
