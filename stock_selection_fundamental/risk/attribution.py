@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 
@@ -19,88 +20,207 @@ def brinson_lite_attribution(
                 "market_component",
                 "industry_component",
                 "selection_component",
-                "style_component",
+                "interaction_component",
+                "unexplained_component",
+                "active_model_error",
+                "total_return_recon_error",
             ]
         )
 
     nav = nav_history.copy().sort_values("date")
-    nav["portfolio_return"] = nav["nav"].pct_change().fillna(0.0)
-    nav["benchmark_return"] = nav["benchmark_nav"].pct_change().fillna(0.0)
+    nav["date"] = pd.to_datetime(nav["date"])
+    nav["portfolio_return"] = pd.to_numeric(nav["nav"], errors="coerce").pct_change().fillna(0.0)
+    nav["benchmark_return"] = pd.to_numeric(nav["benchmark_nav"], errors="coerce").pct_change().fillna(0.0)
     nav["active_return"] = nav["portfolio_return"] - nav["benchmark_return"]
 
     industries = security_master[["symbol", "industry_std"]].drop_duplicates("symbol")
-    industry_returns = _industry_daily_returns(price_history=price_history, industries=industries)
-    industry_weights_port = _portfolio_industry_weights(holdings_history=holdings_history, industries=industries)
-    industry_weights_bmk = _benchmark_industry_weights(price_history=price_history, industries=industries)
+    symbol_panel = _build_symbol_panel(
+        holdings_history=holdings_history,
+        price_history=price_history,
+        industries=industries,
+    )
+    industry_daily = _industry_level_decomposition(symbol_panel)
 
-    rows: list[dict[str, float | pd.Timestamp]] = []
-    for _, row in nav.iterrows():
-        date = pd.Timestamp(row["date"])
-        r_bmk = float(row["benchmark_return"])
-        active = float(row["active_return"])
-        market_component = r_bmk
+    by_date = (
+        industry_daily.groupby("date")[["industry_component", "selection_component", "interaction_component"]]
+        .sum()
+        .reset_index()
+    )
+    result = nav.merge(by_date, on="date", how="left").fillna(
+        {"industry_component": 0.0, "selection_component": 0.0, "interaction_component": 0.0}
+    )
+    result["market_component"] = result["benchmark_return"]
+    result["active_model_error"] = (
+        result["active_return"]
+        - result["industry_component"]
+        - result["selection_component"]
+        - result["interaction_component"]
+    )
+    result["unexplained_component"] = result["active_model_error"]
+    result["total_return_recon_error"] = (
+        result["portfolio_return"]
+        - result["market_component"]
+        - result["industry_component"]
+        - result["selection_component"]
+        - result["interaction_component"]
+        - result["unexplained_component"]
+    )
 
-        day_ind_ret = industry_returns[industry_returns["date"] == date].set_index("industry_std")["industry_return"]
-        wp = industry_weights_port[industry_weights_port["date"] == date].set_index("industry_std")["weight"]
-        wb = industry_weights_bmk[industry_weights_bmk["date"] == date].set_index("industry_std")["weight"]
-        idx = day_ind_ret.index.union(wp.index).union(wb.index)
-        day_ind_ret = day_ind_ret.reindex(idx).fillna(0.0)
-        wp = wp.reindex(idx).fillna(0.0)
-        wb = wb.reindex(idx).fillna(0.0)
+    result["cum_portfolio_return"] = (1.0 + result["portfolio_return"]).cumprod() - 1.0
+    result["cum_benchmark_return"] = (1.0 + result["benchmark_return"]).cumprod() - 1.0
+    result["cum_active_return"] = (1.0 + result["cum_portfolio_return"]) / (1.0 + result["cum_benchmark_return"]) - 1.0
+    for col in [
+        "industry_component",
+        "selection_component",
+        "interaction_component",
+        "unexplained_component",
+        "active_model_error",
+    ]:
+        result[f"cum_{col}"] = result[col].cumsum()
 
-        industry_component = float(((wp - wb) * day_ind_ret).sum())
-        selection_component = float(active - industry_component)
+    return result.sort_values("date").reset_index(drop=True)
+
+
+def summarize_attribution(attribution_daily: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "start_date",
+        "end_date",
+        "n_days",
+        "total_portfolio_return",
+        "total_benchmark_return",
+        "total_active_return",
+        "industry_sum",
+        "selection_sum",
+        "interaction_sum",
+        "unexplained_sum",
+        "active_model_error_abs_mean",
+        "active_model_error_abs_max",
+        "total_return_recon_error_abs_max",
+    ]
+    if attribution_daily.empty:
+        return pd.DataFrame(columns=columns)
+
+    frame = attribution_daily.copy().sort_values("date")
+    start_date = pd.Timestamp(frame["date"].min())
+    end_date = pd.Timestamp(frame["date"].max())
+    total_portfolio = float((1.0 + frame["portfolio_return"]).prod() - 1.0)
+    total_benchmark = float((1.0 + frame["benchmark_return"]).prod() - 1.0)
+    total_active = float((1.0 + total_portfolio) / (1.0 + total_benchmark) - 1.0)
+    summary = pd.DataFrame(
+        [
+            {
+                "start_date": start_date,
+                "end_date": end_date,
+                "n_days": int(frame["date"].nunique()),
+                "total_portfolio_return": total_portfolio,
+                "total_benchmark_return": total_benchmark,
+                "total_active_return": total_active,
+                "industry_sum": float(frame["industry_component"].sum()),
+                "selection_sum": float(frame["selection_component"].sum()),
+                "interaction_sum": float(frame["interaction_component"].sum()),
+                "unexplained_sum": float(frame["unexplained_component"].sum()),
+                "active_model_error_abs_mean": float(frame["active_model_error"].abs().mean()),
+                "active_model_error_abs_max": float(frame["active_model_error"].abs().max()),
+                "total_return_recon_error_abs_max": float(frame["total_return_recon_error"].abs().max()),
+            }
+        ]
+    )
+    return summary
+
+
+def _build_symbol_panel(
+    holdings_history: pd.DataFrame,
+    price_history: pd.DataFrame,
+    industries: pd.DataFrame,
+) -> pd.DataFrame:
+    returns = _symbol_daily_returns(price_history=price_history)
+    portfolio_weights = _portfolio_symbol_weights(holdings_history=holdings_history)
+    benchmark_weights = _benchmark_symbol_weights(returns=returns)
+
+    panel = (
+        returns.merge(portfolio_weights, on=["date", "symbol"], how="left")
+        .merge(benchmark_weights, on=["date", "symbol"], how="left")
+        .merge(industries, on="symbol", how="left")
+    )
+    panel["industry_std"] = panel["industry_std"].fillna("UNKNOWN")
+    panel["w_p"] = pd.to_numeric(panel["w_p"], errors="coerce").fillna(0.0)
+    panel["w_b"] = pd.to_numeric(panel["w_b"], errors="coerce").fillna(0.0)
+    panel["ret"] = pd.to_numeric(panel["ret"], errors="coerce").fillna(0.0)
+    return panel
+
+
+def _industry_level_decomposition(symbol_panel: pd.DataFrame) -> pd.DataFrame:
+    if symbol_panel.empty:
+        return pd.DataFrame(columns=["date", "industry_std", "industry_component", "selection_component", "interaction_component"])
+
+    rows: list[dict[str, float | pd.Timestamp | str]] = []
+    for (date, industry), group in symbol_panel.groupby(["date", "industry_std"]):
+        row = _per_industry_row(group)
         rows.append(
             {
-                "date": date,
-                "portfolio_return": float(row["portfolio_return"]),
-                "benchmark_return": r_bmk,
-                "active_return": active,
-                "market_component": market_component,
-                "industry_component": industry_component,
-                "selection_component": selection_component,
-                "style_component": 0.0,
+                "date": pd.Timestamp(date),
+                "industry_std": str(industry),
+                "W_p": float(row["W_p"]),
+                "W_b": float(row["W_b"]),
+                "R_p": float(row["R_p"]),
+                "R_b": float(row["R_b"]),
             }
         )
-    result = pd.DataFrame(rows).sort_values("date").reset_index(drop=True)
-    for col in ["market_component", "industry_component", "selection_component", "style_component", "active_return"]:
-        result[f"cum_{col}"] = (1 + result[col]).cumprod() - 1
-    return result
+    grouped = pd.DataFrame(rows)
+    grouped["industry_component"] = (grouped["W_p"] - grouped["W_b"]) * grouped["R_b"]
+    grouped["selection_component"] = grouped["W_b"] * (grouped["R_p"] - grouped["R_b"])
+    grouped["interaction_component"] = (grouped["W_p"] - grouped["W_b"]) * (grouped["R_p"] - grouped["R_b"])
+    return grouped
 
 
-def _industry_daily_returns(price_history: pd.DataFrame, industries: pd.DataFrame) -> pd.DataFrame:
+def _per_industry_row(group: pd.DataFrame) -> pd.Series:
+    wp = pd.to_numeric(group["w_p"], errors="coerce").fillna(0.0)
+    wb = pd.to_numeric(group["w_b"], errors="coerce").fillna(0.0)
+    ret = pd.to_numeric(group["ret"], errors="coerce").fillna(0.0)
+
+    w_p_total = float(wp.sum())
+    w_b_total = float(wb.sum())
+    r_p = float(np.average(ret, weights=wp)) if w_p_total > 0 else 0.0
+    r_b = float(np.average(ret, weights=wb)) if w_b_total > 0 else 0.0
+    return pd.Series(
+        {
+            "W_p": w_p_total,
+            "W_b": w_b_total,
+            "R_p": r_p,
+            "R_b": r_b,
+        }
+    )
+
+
+def _symbol_daily_returns(price_history: pd.DataFrame) -> pd.DataFrame:
     if price_history.empty:
-        return pd.DataFrame(columns=["date", "industry_std", "industry_return"])
+        return pd.DataFrame(columns=["date", "symbol", "ret"])
     frame = price_history[["date", "symbol", "close"]].copy()
-    frame["date"] = pd.to_datetime(frame["date"])
+    frame = frame[~frame["symbol"].astype(str).str.startswith("^")]
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
     frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
     frame = frame.sort_values(["symbol", "date"])
-    frame["ret"] = frame.groupby("symbol")["close"].pct_change()
-    frame = frame.merge(industries, on="symbol", how="left")
-    frame["industry_std"] = frame["industry_std"].fillna("UNKNOWN")
-    grouped = frame.groupby(["date", "industry_std"])["ret"].mean().reset_index(name="industry_return")
-    return grouped.dropna(subset=["industry_return"])
+    frame["ret"] = frame.groupby("symbol")["close"].pct_change().fillna(0.0)
+    return frame[["date", "symbol", "ret"]]
 
 
-def _portfolio_industry_weights(holdings_history: pd.DataFrame, industries: pd.DataFrame) -> pd.DataFrame:
+def _portfolio_symbol_weights(holdings_history: pd.DataFrame) -> pd.DataFrame:
     if holdings_history.empty:
-        return pd.DataFrame(columns=["date", "industry_std", "weight"])
+        return pd.DataFrame(columns=["date", "symbol", "w_p"])
     frame = holdings_history[["date", "symbol", "portfolio_weight"]].copy()
-    frame["date"] = pd.to_datetime(frame["date"])
-    frame = frame.merge(industries, on="symbol", how="left")
-    frame["industry_std"] = frame["industry_std"].fillna("UNKNOWN")
-    return frame.groupby(["date", "industry_std"])["portfolio_weight"].sum().reset_index(name="weight")
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+    frame["portfolio_weight"] = pd.to_numeric(frame["portfolio_weight"], errors="coerce").fillna(0.0)
+    frame = frame.groupby(["date", "symbol"], as_index=False)["portfolio_weight"].sum()
+    frame = frame.rename(columns={"portfolio_weight": "w_p"})
+    total = frame.groupby("date")["w_p"].transform("sum")
+    frame["w_p"] = frame["w_p"] / total.where(total > 0, 1.0)
+    return frame
 
 
-def _benchmark_industry_weights(price_history: pd.DataFrame, industries: pd.DataFrame) -> pd.DataFrame:
-    if price_history.empty:
-        return pd.DataFrame(columns=["date", "industry_std", "weight"])
-    frame = price_history[["date", "symbol"]].copy()
-    frame["date"] = pd.to_datetime(frame["date"])
-    frame = frame[~frame["symbol"].astype(str).str.startswith("^")]
-    frame = frame.merge(industries, on="symbol", how="left")
-    frame["industry_std"] = frame["industry_std"].fillna("UNKNOWN")
-    counts = frame.groupby(["date", "industry_std"])["symbol"].nunique().reset_index(name="count")
-    total = counts.groupby("date")["count"].transform("sum")
-    counts["weight"] = counts["count"] / total.where(total > 0, 1)
-    return counts[["date", "industry_std", "weight"]]
+def _benchmark_symbol_weights(returns: pd.DataFrame) -> pd.DataFrame:
+    if returns.empty:
+        return pd.DataFrame(columns=["date", "symbol", "w_b"])
+    frame = returns[["date", "symbol"]].copy()
+    frame["count"] = frame.groupby("date")["symbol"].transform("count")
+    frame["w_b"] = 1.0 / frame["count"].where(frame["count"] > 0, 1.0)
+    return frame[["date", "symbol", "w_b"]]

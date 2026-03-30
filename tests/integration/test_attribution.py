@@ -19,9 +19,24 @@ class AttributionIntegrationTests(unittest.TestCase):
             bundle.backtest["data_dir"] = str(data_dir)
             artifacts = BacktestEngine(bundle).run(LocalCSVDataProvider(data_dir))
             attr = artifacts.research_outputs.get("attribution_daily")
+            attr_summary = artifacts.research_outputs.get("attribution_summary")
             self.assertIsNotNone(attr)
             self.assertFalse(attr.empty)
-            self.assertTrue({"date", "active_return", "industry_component", "selection_component"}.issubset(attr.columns))
+            self.assertTrue(
+                {
+                    "date",
+                    "active_return",
+                    "industry_component",
+                    "selection_component",
+                    "interaction_component",
+                    "unexplained_component",
+                    "active_model_error",
+                }.issubset(attr.columns)
+            )
+            self.assertIsNotNone(attr_summary)
+            self.assertFalse(attr_summary.empty)
+            self.assertIn("total_return_recon_error_abs_max", attr_summary.columns)
+            self.assertLess(float(attr_summary["total_return_recon_error_abs_max"].iloc[0]), 1e-10)
 
 
 if __name__ == "__main__":

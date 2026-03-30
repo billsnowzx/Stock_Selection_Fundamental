@@ -39,6 +39,12 @@ def export_html_report(
         if attribution is not None and not attribution.empty
         else "<p>No attribution output.</p>"
     )
+    attribution_summary = artifacts.research_outputs.get("attribution_summary")
+    attribution_summary_html = (
+        attribution_summary.to_html(index=False, float_format=lambda x: f"{x:.6f}")
+        if attribution_summary is not None and not attribution_summary.empty
+        else "<p>No attribution summary output.</p>"
+    )
     constraint_stats = artifacts.research_outputs.get("constraint_stats")
     constraint_html = (
         constraint_stats.to_html(index=False, float_format=lambda x: f"{x:.6f}")
@@ -84,6 +90,8 @@ def export_html_report(
   {quantile_html}
   <h2>约束命中统计</h2>
   {constraint_html}
+  <h2>归因摘要</h2>
+  {attribution_summary_html}
   <h2>归因（近30日）</h2>
   {attribution_html}
   <h2>公司行为（近30条）</h2>

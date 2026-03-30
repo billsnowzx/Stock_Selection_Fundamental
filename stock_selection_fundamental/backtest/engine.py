@@ -15,7 +15,7 @@ from ..providers.base import DataProvider
 from ..research.ic import compute_ic_bundle
 from ..research.quantiles import compute_quantile_forward_returns
 from ..research.stability import compute_stability_bundle
-from ..risk.attribution import brinson_lite_attribution
+from ..risk.attribution import brinson_lite_attribution, summarize_attribution
 from ..risk.exposures import estimate_style_exposure
 from ..risk.neutralization import neutralize_by_industry
 from ..signals.composite_score import compute_composite_score
@@ -438,6 +438,7 @@ class BacktestEngine:
             price_history=price_history,
             security_master=master,
         )
+        attribution_summary = summarize_attribution(attribution)
 
         research_outputs = {
             "ic_timeseries": ic_bundle.get("ic_timeseries", pd.DataFrame()),
@@ -449,6 +450,7 @@ class BacktestEngine:
             "factor_correlation": stability_bundle.get("correlation", pd.DataFrame()),
             "constraint_stats": pd.DataFrame(constraint_rows),
             "attribution_daily": attribution,
+            "attribution_summary": attribution_summary,
             "corporate_action_ledger": pd.DataFrame(corporate_action_rows),
         }
         constraint_stats = pd.DataFrame(constraint_rows)
